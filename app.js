@@ -528,6 +528,29 @@ function initAudio() {
   };
   chipBus('chipR'); chipBus('chipL'); chipBus('chipB');
 
+  /* --- sampled-instrument busses: samples are already amped/distorted,
+   * so these are clean gains with light shaping --- */
+  const sampBus = (name, level, eq = []) => {
+    let node = ctx.createGain(); node.gain.value = level;
+    const head = node;
+    for (const [type, freq, gain] of eq) {
+      const f = ctx.createBiquadFilter();
+      f.type = type; f.frequency.value = freq;
+      if (gain != null) f.gain.value = gain;
+      node.connect(f); node = f;
+    }
+    node.connect(master);
+    busses[name] = head;
+  };
+  sampBus('sampR', 0.85, [['peaking', 2800, 2], ['highpass', 70, null]]);
+  sampBus('sampL', 0.9, [['highpass', 180, null]]);
+  sampBus('sampB', 1.0, [['lowpass', 3000, null]]);
+  // give the sampled lead the same slap-back + room as the synth lead
+  const sl1 = ctx.createGain(); sl1.gain.value = 0.5;
+  busses.sampL.connect(sl1); sl1.connect(dly);
+  const sl2 = ctx.createGain(); sl2.gain.value = 0.2;
+  busses.sampL.connect(sl2); sl2.connect(reverbSend);
+
   // arcade echo on the chip lead
   const cdly = ctx.createDelay(1); cdly.delayTime.value = STEP * 3; chipEcho = cdly;
   const cfb = ctx.createGain(); cfb.gain.value = 0.3;
@@ -667,21 +690,133 @@ function chipBassNote(t, midi, dur, vel = 1) {
   o.start(t); o.stop(t + dur + 0.05);
 }
 
+/* --- sampled metal instruments ---
+ * Real recorded notes from the FluidR3_GM soundfont (MIT, by Frank Wen),
+ * via the MIT-licensed gleitz/midi-js-soundfonts mirror. Vendored in
+ * sounds/; falls back to the CDN, then to the synth engine. */
+const SAMPLE_PLAN = {
+  rhythm: { folder: 'distortion_guitar-mp3', lo: 38, hi: 64 },
+  lead: { folder: 'overdriven_guitar-mp3', lo: 58, hi: 90 },
+  bass: { folder: 'electric_bass_pick-mp3', lo: 26, hi: 48 },
+};
+const SAMPLE_SOURCES = [
+  // vendored locally (fetch can't read file:// pages, so skip it there)
+  ...(location.protocol === 'file:' ? [] : ['sounds/']),
+  'https://raw.githubusercontent.com/gleitz/midi-js-soundfonts/gh-pages/FluidR3_GM/',
+  'https://cdn.jsdelivr.net/gh/gleitz/midi-js-soundfonts@gh-pages/FluidR3_GM/',
+];
+const FLAT = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
+const midiName = m => FLAT[m % 12] + (Math.floor(m / 12) - 1);
+
+const sampleBank = { rhythm: {}, lead: {}, bass: {} };
+let samplesReady = false, samplesLoading = false;
+
+async function fetchSample(path) {
+  for (const base of SAMPLE_SOURCES) {
+    try {
+      const r = await fetch(base + path);
+      if (!r.ok) continue;
+      return await ctx.decodeAudioData(await r.arrayBuffer());
+    } catch { /* try next source */ }
+  }
+  return null;
+}
+
+async function loadSamples() {
+  if (samplesLoading || samplesReady || !ctx) return;
+  samplesLoading = true;
+  updateEngineUI();
+  const jobs = [];
+  for (const [inst, { folder, lo, hi }] of Object.entries(SAMPLE_PLAN)) {
+    for (let m = lo; m <= hi; m += 2) {
+      jobs.push(fetchSample(folder + '/' + midiName(m) + '.mp3')
+        .then(buf => { if (buf) sampleBank[inst][m] = buf; }));
+    }
+  }
+  await Promise.all(jobs);
+  // good enough if every instrument got at least half its notes
+  samplesReady = Object.keys(SAMPLE_PLAN).every(inst => {
+    const { lo, hi } = SAMPLE_PLAN[inst];
+    return Object.keys(sampleBank[inst]).length >= Math.ceil(((hi - lo) / 2 + 1) / 2);
+  });
+  samplesLoading = false;
+  updateEngineUI();
+}
+
+function updateEngineUI() {
+  const b = document.querySelector('#engine .eng[data-mode="metal"]');
+  if (!b) return;
+  b.classList.toggle('loading', samplesLoading);
+  b.title = samplesLoading ? 'Loading sampled instruments…'
+    : samplesReady ? 'Amp-sim metal engine (sampled guitars/bass — FluidR3 soundfont, MIT)'
+      : 'Amp-sim metal engine (synthesized — samples unavailable offline)';
+}
+
+function samplePluck(inst, t, midi, dur, { pm = false, vel = 1, vibrato = false } = {}) {
+  const bank = sampleBank[inst];
+  let best = null, bestD = Infinity;
+  for (const k in bank) {
+    const d = Math.abs(k - midi);
+    if (d < bestD) { bestD = d; best = +k; }
+  }
+  if (best === null) return false;
+
+  const src = ctx.createBufferSource();
+  src.buffer = bank[best];
+  // repitch to the exact note + a few cents of human wobble
+  src.playbackRate.value = Math.pow(2, (midi - best) / 12) * (1 + (Math.random() - 0.5) * 0.004);
+
+  let node = src;
+  if (pm && inst !== 'bass') { // choke the chug
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2300;
+    src.connect(lp); node = lp;
+  }
+  const g = ctx.createGain();
+  const amp = (inst === 'bass' ? 1.1 : inst === 'lead' ? 0.8 : 0.75) * vel * (0.9 + Math.random() * 0.2);
+  g.gain.setValueAtTime(amp, t);
+  if (pm) {
+    g.gain.setValueAtTime(amp, t + 0.07);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+  } else {
+    g.gain.setValueAtTime(amp, t + Math.max(0.02, dur));
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur + 0.18);
+  }
+  node.connect(g); g.connect(busses['samp' + inst[0].toUpperCase()]);
+
+  if (vibrato) {
+    const lfo = ctx.createOscillator(); lfo.frequency.value = 5.0 + Math.random() * 0.9;
+    const lg = ctx.createGain();
+    lg.gain.setValueAtTime(0, t);
+    lg.gain.linearRampToValueAtTime(0.012, t + 0.4);
+    lfo.connect(lg); lg.connect(src.playbackRate);
+    lfo.start(t); lfo.stop(t + dur + 0.3);
+  }
+  src.start(t);
+  src.stop(t + (pm ? 0.2 : dur + 0.25));
+  return true;
+}
+
 /* --- mode-aware note dispatchers (the schedule calls these) ---
  * Metal gets a few ms of timing jitter so it doesn't sit on a perfect grid;
  * chip stays dead-on the grid (that tightness is part of its charm). */
 const jit = ms => (Math.random() - 0.5) * ms;
 function playRhythm(at, m, dur, pm, vel) {
-  if (soundMode === 'metal') pluck(busses.rhythm, at + jit(0.012), m, dur, { pm, vel });
-  else chipPulse(busses.chipR, at, m, dur, { wave: PW25, pm, vel });
+  if (soundMode === 'metal') {
+    const t = at + jit(0.012);
+    if (!(samplesReady && samplePluck('rhythm', t, m, dur, { pm, vel }))) pluck(busses.rhythm, t, m, dur, { pm, vel });
+  } else chipPulse(busses.chipR, at, m, dur, { wave: PW25, pm, vel });
 }
 function playLead(at, m, dur, vib) {
-  if (soundMode === 'metal') pluck(busses.lead, at + jit(0.016), m, dur, { lead: true, vibrato: vib });
-  else chipPulse(busses.chipL, at, m, dur, { vel: 1.1, vibrato: vib });
+  if (soundMode === 'metal') {
+    const t = at + jit(0.016);
+    if (!(samplesReady && samplePluck('lead', t, m, dur, { vibrato: vib }))) pluck(busses.lead, t, m, dur, { lead: true, vibrato: vib });
+  } else chipPulse(busses.chipL, at, m, dur, { vel: 1.1, vibrato: vib });
 }
 function playBass(at, m, dur) {
-  if (soundMode === 'metal') pluck(busses.bass, at + jit(0.008), m, dur, { bass: true, pm: dur <= 2 * STEP });
-  else chipBassNote(at, m, dur);
+  if (soundMode === 'metal') {
+    const t = at + jit(0.008);
+    if (!(samplesReady && samplePluck('bass', t, m, dur, { pm: dur <= 2 * STEP }))) pluck(busses.bass, t, m, dur, { bass: true, pm: dur <= 2 * STEP });
+  } else chipBassNote(at, m, dur);
 }
 
 /* --- drums --- */
@@ -851,6 +986,7 @@ function begin() {
   started = true;
   document.getElementById('start').style.display = 'none';
   initAudio();
+  loadSamples(); // async; metal mode uses the synth until these arrive
   if (chipEcho) chipEcho.delayTime.value = STEP * 3;
   schedule = buildSchedule();
   startCtxTime = ctx.currentTime + 0.6;

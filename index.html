@@ -40,6 +40,8 @@
   #engine .eng .ico { display: flex; }
   #engine .eng:hover { color: #e7e9f0; }
   #engine .eng.active { color: #05060a; background: #f59e0b; box-shadow: 0 0 18px rgba(245, 158, 11, 0.4); }
+  #engine .eng.loading { animation: engPulse 1.1s ease-in-out infinite; }
+  @keyframes engPulse { 50% { opacity: 0.45; } }
 
   #controls {
     position: absolute; top: 14px; right: 18px; display: flex; gap: 8px; align-items: center;
