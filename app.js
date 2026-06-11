@@ -4,7 +4,13 @@
  * SEGFAULT — "Kernel Panic"
  * A falling-notes visualizer for a full synthesized metal band:
  * rhythm guitar / lead guitar / bass / drums. No vocals.
- * Everything (music + sound + visuals) is generated in-browser.
+ *
+ * Sound: Karplus-Strong plucked strings through a waveshaper
+ * amp + cab sim; physically-flavored drums (tuned sine drops,
+ * metallic square-bank cymbals); generated-IR convolver reverb.
+ *
+ * Visuals: falling notes land on a stage where an animated
+ * character per instrument performs in sync with the music.
  * ============================================================ */
 
 /* ---------------- Song data ---------------- */
@@ -181,23 +187,27 @@ function expandRhythm() {
   const out = [];
   for (const n of R) {
     const tones = n.ch ? [n.m, n.m + 7, n.m + 12] : [n.m];
-    for (const m of tones) out.push({ t: n.s * STEP, d: n.d * STEP, m, pm: n.pm });
+    for (const m of tones) out.push({ t: n.s * STEP, d: n.d * STEP, m, pm: n.pm, acc: n.ch });
   }
   return out;
 }
 
-const DRUM_LANES = ['K', 'S', 'H', 'T', 'C'];
 const DRUM_LABEL = { K: 'KICK', S: 'SNARE', H: 'HAT', T: 'TOM', C: 'CRASH' };
+// where each drum lane sits across the column — matches the drawn kit
+const KIT_FRAC = { H: 0.13, S: 0.32, K: 0.52, T: 0.68, C: 0.87 };
 
 const TRACKS = [
   { name: 'RHYTHM GUITAR', color: '#f59e0b', glow: 'rgba(245,158,11,', notes: expandRhythm(), w: 0.29 },
   { name: 'LEAD GUITAR', color: '#22d3ee', glow: 'rgba(34,211,238,', notes: L.map(n => ({ t: n.s * STEP, d: n.d * STEP, m: n.m })), w: 0.29 },
   { name: 'BASS', color: '#a78bfa', glow: 'rgba(167,139,250,', notes: BS.map(n => ({ t: n.s * STEP, d: n.d * STEP, m: n.m })), w: 0.2 },
-  { name: 'DRUMS', color: '#f43f5e', glow: 'rgba(244,63,94,', notes: DRm.map(n => ({ t: n.s * STEP, d: 0.08, lane: DRUM_LANES.indexOf(n.p), p: n.p })), w: 0.22, drums: true },
+  { name: 'DRUMS', color: '#f43f5e', glow: 'rgba(244,63,94,', notes: DRm.map(n => ({ t: n.s * STEP, d: 0.08, p: n.p, acc: n.p === 'C' })), w: 0.22, drums: true },
 ];
 
 for (const tr of TRACKS) {
   tr.notes.sort((a, b) => a.t - b.t);
+  tr._ptr = 0;
+  tr._laneHit = {};
+  tr._lastT = -1;
   if (!tr.drums) {
     let lo = Infinity, hi = -Infinity;
     for (const n of tr.notes) { lo = Math.min(lo, n.m); hi = Math.max(hi, n.m); }
@@ -205,12 +215,15 @@ for (const tr of TRACKS) {
   }
 }
 
-/* ---------------- Audio engine ---------------- */
+/* ============================================================
+ * Audio engine
+ * ============================================================ */
 
 let ctx = null, master = null, busses = null, noiseBuf = null;
+let hatBuf = null, crashBuf = null, reverbSend = null;
 
 function distCurve(k) {
-  const n = 1024, c = new Float32Array(n);
+  const n = 2048, c = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const x = (i / (n - 1)) * 2 - 1;
     c[i] = Math.tanh(k * x);
@@ -218,15 +231,57 @@ function distCurve(k) {
   return c;
 }
 
-// guitar/bass "amp": drive -> waveshaper -> tone stack -> level
-function makeAmp({ drive, k, tone, hp, level }) {
+/* --- guitar/bass amp: drive -> tanh clip -> cab sim EQ -> level --- */
+function makeAmp({ drive, k, level, eq }) {
   const pre = ctx.createGain(); pre.gain.value = drive;
-  const ws = ctx.createWaveShaper(); ws.curve = distCurve(k); ws.oversample = '2x';
-  const hpf = ctx.createBiquadFilter(); hpf.type = 'highpass'; hpf.frequency.value = hp;
-  const lpf = ctx.createBiquadFilter(); lpf.type = 'lowpass'; lpf.frequency.value = tone;
+  const ws = ctx.createWaveShaper(); ws.curve = distCurve(k); ws.oversample = '4x';
+  let node = ws;
+  pre.connect(ws);
+  for (const [type, freq, gain, q] of eq) {
+    const f = ctx.createBiquadFilter();
+    f.type = type; f.frequency.value = freq;
+    if (gain != null) f.gain.value = gain;
+    if (q != null) f.Q.value = q;
+    node.connect(f); node = f;
+  }
   const out = ctx.createGain(); out.gain.value = level;
-  pre.connect(ws); ws.connect(hpf); hpf.connect(lpf); lpf.connect(out); out.connect(master);
+  node.connect(out); out.connect(master);
   return { in: pre, out };
+}
+
+/* --- pre-rendered metallic cymbal content (sum of detuned squares + noise) --- */
+function renderMetal(dur, freqs, noiseAmt) {
+  const sr = ctx.sampleRate;
+  const len = Math.floor(sr * dur);
+  const buf = ctx.createBuffer(1, len, sr);
+  const d = buf.getChannelData(0);
+  const ph = freqs.map(() => Math.random() * Math.PI * 2);
+  for (let i = 0; i < len; i++) {
+    const t = i / sr;
+    let v = 0;
+    for (let j = 0; j < freqs.length; j++) {
+      v += Math.sin(2 * Math.PI * freqs[j] * t + ph[j]) > 0 ? 1 : -1;
+    }
+    d[i] = v / freqs.length + (Math.random() * 2 - 1) * noiseAmt;
+  }
+  return buf;
+}
+
+function makeReverb() {
+  const sr = ctx.sampleRate, dur = 1.4;
+  const len = Math.floor(sr * dur);
+  const ir = ctx.createBuffer(2, len, sr);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = ir.getChannelData(ch);
+    for (let i = 0; i < len; i++) {
+      d[i] = (Math.random() * 2 - 1) * Math.exp(-3.2 * i / len);
+    }
+  }
+  const conv = ctx.createConvolver(); conv.buffer = ir;
+  const wet = ctx.createGain(); wet.gain.value = 0.55;
+  const send = ctx.createGain(); send.gain.value = 1;
+  send.connect(conv); conv.connect(wet); wet.connect(master);
+  return send;
 }
 
 function initAudio() {
@@ -245,111 +300,187 @@ function initAudio() {
   const data = noiseBuf.getChannelData(0);
   for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
 
+  // 808-style inharmonic partials for the hats; random shimmer bank for the crash
+  hatBuf = renderMetal(0.4, [263, 400, 421, 474, 587, 845], 0.15);
+  const crashFreqs = [];
+  for (let i = 0; i < 14; i++) crashFreqs.push(900 + Math.random() * 5500);
+  crashBuf = renderMetal(2.2, crashFreqs, 0.4);
+
+  reverbSend = makeReverb();
+
   busses = {
-    rhythm: makeAmp({ drive: 3.2, k: 5, tone: 3400, hp: 70, level: 0.34 }),
-    lead: makeAmp({ drive: 2.6, k: 4, tone: 4600, hp: 240, level: 0.4 }),
-    bass: makeAmp({ drive: 1.8, k: 3, tone: 950, hp: 30, level: 0.55 }),
-    drums: (() => { const g = ctx.createGain(); g.gain.value = 0.9; g.connect(master); return { in: g }; })(),
+    rhythm: makeAmp({
+      drive: 2.8, k: 7, level: 0.34,
+      eq: [
+        ['highpass', 85, null, 0.7],
+        ['peaking', 500, -7, 0.9],     // mid scoop
+        ['peaking', 2400, 5, 1.1],     // presence bite
+        ['lowpass', 5200, null, 0.7],
+        ['lowpass', 6200, null, 0.7],  // cab rolloff
+      ],
+    }),
+    lead: makeAmp({
+      drive: 2.2, k: 5, level: 0.42,
+      eq: [
+        ['highpass', 220, null, 0.7],
+        ['peaking', 1500, 3, 1],
+        ['peaking', 3200, 4, 1.2],
+        ['lowpass', 6000, null, 0.7],
+      ],
+    }),
+    bass: makeAmp({
+      drive: 1.7, k: 3, level: 0.5,
+      eq: [
+        ['highpass', 32, null, 0.7],
+        ['peaking', 750, 4, 1],        // growl
+        ['lowpass', 2400, null, 0.7],
+      ],
+    }),
+    drums: (() => { const g = ctx.createGain(); g.gain.value = 0.8; g.connect(master); return { in: g }; })(),
   };
 
-  // a touch of slap-back delay on the lead so it sings
+  // a touch of slap-back delay + room on the lead so it sings
   const dly = ctx.createDelay(1); dly.delayTime.value = 0.32;
   const fb = ctx.createGain(); fb.gain.value = 0.3;
-  const wet = ctx.createGain(); wet.gain.value = 0.18;
+  const wet = ctx.createGain(); wet.gain.value = 0.16;
   busses.lead.out.connect(dly); dly.connect(fb); fb.connect(dly);
   dly.connect(wet); wet.connect(master);
+  const leadVerb = ctx.createGain(); leadVerb.gain.value = 0.2;
+  busses.lead.out.connect(leadVerb); leadVerb.connect(reverbSend);
 }
 
-function guitarNote(bus, t, midi, dur, { pm = false, vel = 1, vibrato = false } = {}) {
-  const f = midiHz(midi);
-  const env = ctx.createGain();
-  const flt = ctx.createBiquadFilter();
-  flt.type = 'lowpass';
-  flt.frequency.value = pm ? 1300 : 6000;
-  flt.connect(env); env.connect(bus.in);
+/* --- Karplus-Strong plucked string, cached per (pitch, duration, articulation) --- */
+const ksCache = new Map();
 
-  const oscs = [];
-  for (const det of [-6, 6]) {
-    const o = ctx.createOscillator();
-    o.type = 'sawtooth';
-    o.frequency.value = f;
-    o.detune.value = det;
-    o.connect(flt);
-    oscs.push(o);
+function ksBuffer(midi, dur, { pm, tau, damp, pickLP }) {
+  const key = `${midi}|${pm ? 1 : 0}|${Math.ceil(dur * 16)}|${tau}`;
+  let buf = ksCache.get(key);
+  if (buf) return buf;
+
+  const sr = ctx.sampleRate;
+  const f = midiHz(midi);
+  const N = Math.round(sr / f);
+  const total = pm ? Math.min(dur, 0.3) + 0.12 : dur + 0.45;
+  const len = Math.max(Math.floor(sr * total), N * 2 + 8);
+  buf = ctx.createBuffer(1, len, sr);
+  const d = buf.getChannelData(0);
+
+  // pick excitation: one period of (optionally softened) noise
+  let prev = 0;
+  for (let i = 0; i < N; i++) {
+    const w = Math.random() * 2 - 1;
+    prev = pickLP * prev + (1 - pickLP) * w;
+    d[i] = prev;
   }
+  // pick-position comb (plucking near the bridge)
+  const pp = Math.max(2, Math.floor(N * 0.12));
+  for (let i = N - 1; i >= pp; i--) d[i] -= 0.55 * d[i - pp];
+
+  // string loop: per-period decay from tau, damping blends in a 2-tap average
+  const decay = Math.exp(-1 / (f * tau));
+  for (let i = N + 1; i < len; i++) {
+    d[i] = decay * ((1 - damp) * d[i - N] + damp * 0.5 * (d[i - N] + d[i - N - 1]));
+  }
+  // bake in a short fade-out so notes never click
+  const fade = Math.min(Math.floor(sr * 0.06), len >> 2);
+  for (let i = 0; i < fade; i++) d[len - 1 - i] *= i / fade;
+
+  ksCache.set(key, buf);
+  return buf;
+}
+
+function pluck(bus, t, midi, dur, { pm = false, vel = 1, vibrato = false, bass = false, lead = false } = {}) {
+  const opts = pm
+    ? { pm, tau: bass ? 0.11 : 0.055, damp: 0.6, pickLP: bass ? 0.6 : 0.3 }
+    : { pm, tau: lead ? 2.4 : (bass ? 0.9 : 1.5), damp: lead ? 0.22 : 0.32, pickLP: bass ? 0.55 : 0.15 };
+  const buf = ksBuffer(midi, dur, opts);
+
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const g = ctx.createGain();
+  g.gain.value = 0.55 * vel;
+  src.connect(g); g.connect(bus.in);
 
   if (vibrato) {
-    const lfo = ctx.createOscillator(); lfo.frequency.value = 5.5;
-    const lg = ctx.createGain(); lg.gain.setValueAtTime(0, t);
-    lg.gain.linearRampToValueAtTime(f * 0.012, t + 0.45);
-    lfo.connect(lg);
-    for (const o of oscs) lg.connect(o.frequency);
-    lfo.start(t); lfo.stop(t + dur + 0.3);
+    const lfo = ctx.createOscillator(); lfo.frequency.value = 5.3;
+    const lg = ctx.createGain();
+    lg.gain.setValueAtTime(0, t);
+    lg.gain.linearRampToValueAtTime(0.011, t + 0.45);
+    lfo.connect(lg); lg.connect(src.playbackRate);
+    lfo.start(t); lfo.stop(t + buf.duration);
   }
-
-  const g = 0.22 * vel;
-  env.gain.setValueAtTime(0, t);
-  env.gain.linearRampToValueAtTime(g, t + 0.005);
-  if (pm) {
-    env.gain.exponentialRampToValueAtTime(0.001, t + Math.max(0.1, Math.min(dur, 0.16)));
-  } else {
-    env.gain.setValueAtTime(g, t + Math.max(0.01, dur - 0.04));
-    env.gain.exponentialRampToValueAtTime(0.001, t + dur + 0.12);
-  }
-  const end = t + (pm ? 0.2 : dur + 0.2);
-  for (const o of oscs) { o.start(t); o.stop(end); }
+  src.start(t);
 }
 
-function noiseHit(t, { hpFreq, bpFreq, dur, gain }) {
+/* --- drums --- */
+function noiseHit(t, { hpFreq, bpFreq, bpQ = 0.9, dur, gain, verb = 0 }) {
   const src = ctx.createBufferSource(); src.buffer = noiseBuf;
+  src.loop = true;
   let node = src;
   if (hpFreq) {
     const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = hpFreq;
     node.connect(hp); node = hp;
   }
   if (bpFreq) {
-    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = bpFreq; bp.Q.value = 0.9;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = bpFreq; bp.Q.value = bpQ;
     node.connect(bp); node = bp;
   }
   const g = ctx.createGain();
   g.gain.setValueAtTime(gain, t);
   g.gain.exponentialRampToValueAtTime(0.001, t + dur);
   node.connect(g); g.connect(busses.drums.in);
+  if (verb) {
+    const vs = ctx.createGain(); vs.gain.value = verb;
+    g.connect(vs); vs.connect(reverbSend);
+  }
   src.start(t); src.stop(t + dur + 0.05);
+}
+
+function metalHit(buf, t, { hpFreq, dur, gain, rate = 1, verb = 0 }) {
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  src.playbackRate.value = rate;
+  const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = hpFreq;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(gain, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  src.connect(hp); hp.connect(g); g.connect(busses.drums.in);
+  if (verb) {
+    const vs = ctx.createGain(); vs.gain.value = verb;
+    g.connect(vs); vs.connect(reverbSend);
+  }
+  src.start(t); src.stop(t + dur + 0.05);
+}
+
+function tonalHit(t, { f0, f1, fallT, dur, gain, type = 'sine', verb = 0 }) {
+  const o = ctx.createOscillator(); o.type = type;
+  o.frequency.setValueAtTime(f0, t);
+  o.frequency.exponentialRampToValueAtTime(f1, t + fallT);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(gain, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(busses.drums.in);
+  if (verb) {
+    const vs = ctx.createGain(); vs.gain.value = verb;
+    g.connect(vs); vs.connect(reverbSend);
+  }
+  o.start(t); o.stop(t + dur + 0.05);
 }
 
 function drumHit(p, t) {
   if (p === 'K') {
-    const o = ctx.createOscillator(); o.type = 'sine';
-    o.frequency.setValueAtTime(150, t);
-    o.frequency.exponentialRampToValueAtTime(46, t + 0.09);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(1.0, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.26);
-    o.connect(g); g.connect(busses.drums.in);
-    o.start(t); o.stop(t + 0.3);
-    noiseHit(t, { hpFreq: 1500, dur: 0.025, gain: 0.4 }); // beater click
+    tonalHit(t, { f0: 160, f1: 47, fallT: 0.07, dur: 0.24, gain: 1.05 });
+    noiseHit(t, { hpFreq: 2000, dur: 0.02, gain: 0.5 });           // beater click
   } else if (p === 'S') {
-    noiseHit(t, { bpFreq: 1800, dur: 0.18, gain: 0.7 });
-    const o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = 190;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.5, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
-    o.connect(g); g.connect(busses.drums.in);
-    o.start(t); o.stop(t + 0.1);
+    tonalHit(t, { f0: 210, f1: 165, fallT: 0.04, dur: 0.09, gain: 0.6, type: 'triangle' });
+    noiseHit(t, { bpFreq: 1300, bpQ: 0.7, dur: 0.12, gain: 0.55 }); // shell crack
+    noiseHit(t, { hpFreq: 3200, dur: 0.2, gain: 0.45, verb: 0.35 }); // wire rattle
   } else if (p === 'H') {
-    noiseHit(t, { hpFreq: 8500, dur: 0.05, gain: 0.22 });
+    metalHit(hatBuf, t, { hpFreq: 7800, dur: 0.055, gain: 0.4, rate: 1 + Math.random() * 0.04 });
   } else if (p === 'C') {
-    noiseHit(t, { hpFreq: 5200, dur: 1.4, gain: 0.45 });
+    metalHit(crashBuf, t, { hpFreq: 3800, dur: 1.6, gain: 0.55, rate: 0.96 + Math.random() * 0.08, verb: 0.3 });
   } else if (p === 'T') {
-    const o = ctx.createOscillator(); o.type = 'sine';
-    o.frequency.setValueAtTime(135, t);
-    o.frequency.exponentialRampToValueAtTime(85, t + 0.2);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.8, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
-    o.connect(g); g.connect(busses.drums.in);
-    o.start(t); o.stop(t + 0.35);
+    tonalHit(t, { f0: 150, f1: 88, fallT: 0.16, dur: 0.32, gain: 0.85, verb: 0.25 });
+    noiseHit(t, { hpFreq: 1500, dur: 0.02, gain: 0.25 });
   }
 }
 
@@ -357,16 +488,16 @@ function drumHit(p, t) {
 function buildSchedule() {
   const ev = [];
   for (const n of R) {
-    const tones = n.ch ? [[n.m, 1], [n.m + 7, 0.8], [n.m + 12, 0.65]] : [[n.m, 1]];
+    const tones = n.ch ? [[n.m, 1], [n.m + 7, 0.8], [n.m + 12, 0.6]] : [[n.m, 1]];
     for (const [m, gv] of tones) {
-      ev.push({ t: n.s * STEP, fire: at => guitarNote(busses.rhythm, at, m, n.d * STEP, { pm: n.pm, vel: n.v * gv }) });
+      ev.push({ t: n.s * STEP, fire: at => pluck(busses.rhythm, at, m, n.d * STEP, { pm: n.pm, vel: n.v * gv }) });
     }
   }
   for (const n of L) {
-    ev.push({ t: n.s * STEP, fire: at => guitarNote(busses.lead, at, n.m, n.d * STEP, { vibrato: n.d >= 6 }) });
+    ev.push({ t: n.s * STEP, fire: at => pluck(busses.lead, at, n.m, n.d * STEP, { lead: true, vibrato: n.d >= 6 }) });
   }
   for (const n of BS) {
-    ev.push({ t: n.s * STEP, fire: at => guitarNote(busses.bass, at, n.m, n.d * STEP, { pm: n.d <= 2 }) });
+    ev.push({ t: n.s * STEP, fire: at => pluck(busses.bass, at, n.m, n.d * STEP, { bass: true, pm: n.d <= 2 }) });
   }
   for (const n of DRm) {
     ev.push({ t: n.s * STEP, fire: at => drumHit(n.p, at) });
@@ -432,7 +563,9 @@ function begin() {
   requestAnimationFrame(frame);
 }
 
-/* ---------------- Visualizer ---------------- */
+/* ============================================================
+ * Visualizer
+ * ============================================================ */
 
 const canvas = document.getElementById('stage');
 const g2d = canvas.getContext('2d');
@@ -453,21 +586,22 @@ const particles = [];
 function noteX(tr, n, colX, colW) {
   const pad = 14;
   if (tr.drums) {
-    const laneW = (colW - pad * 2) / DRUM_LANES.length;
-    return { x: colX + pad + n.lane * laneW + laneW * 0.2, w: laneW * 0.6 };
+    const x = colX + pad + KIT_FRAC[n.p] * (colW - pad * 2);
+    return { x: x - 8, w: 16 };
   }
   const span = tr.hi - tr.lo;
   const laneW = (colW - pad * 2) / span;
   return { x: colX + pad + (n.m - tr.lo) * laneW, w: Math.max(6, laneW * 0.85) };
 }
 
-function spawnSparks(x, y, color) {
-  for (let i = 0; i < 7; i++) {
-    if (particles.length > 350) particles.shift();
+function spawnSparks(x, y, color, big) {
+  const n = big ? 14 : 7;
+  for (let i = 0; i < n; i++) {
+    if (particles.length > 400) particles.shift();
     particles.push({
       x, y, color,
-      vx: (Math.random() - 0.5) * 220,
-      vy: -Math.random() * 260 - 40,
+      vx: (Math.random() - 0.5) * (big ? 320 : 220),
+      vy: -Math.random() * (big ? 360 : 260) - 40,
       life: 1,
     });
   }
@@ -484,6 +618,307 @@ function roundRect(x, y, w, h, r) {
   g2d.closePath();
 }
 
+/* ---------------- Performance state (drives the characters) ---------------- */
+
+function updatePerf(tr, tNow) {
+  if (tNow < tr._lastT - 0.25) { // looped or restarted
+    tr._ptr = 0;
+    tr._laneHit = {};
+    tr._lastHit = tr._accent = undefined;
+    tr._active = null;
+  }
+  tr._lastT = tNow;
+  const ns = tr.notes;
+  while (tr._ptr < ns.length && ns[tr._ptr].t <= tNow) {
+    const n = ns[tr._ptr];
+    tr._lastHit = n.t;
+    tr._lastNote = n;
+    if (n.acc) tr._accent = n.t;
+    if (tr.drums) tr._laneHit[n.p] = n.t;
+    if (!tr.drums && n.t + n.d > tNow) tr._active = n;
+    tr._ptr++;
+  }
+  if (tr._active && tr._active.t + tr._active.d <= tNow) tr._active = null;
+}
+
+const env = (tNow, t0, k) => (t0 === undefined ? 0 : Math.exp(-Math.max(tNow - t0, 0) * k));
+
+/* ---------------- Character drawing ----------------
+ * All characters are dark silhouettes with glowing accents in
+ * their instrument's color, drawn with round-capped strokes.
+ * `s` is a scale factor; poses are driven by the perf state. */
+
+function strokeLine(pts, w, color, blur = 0, blurColor = null) {
+  g2d.strokeStyle = color;
+  g2d.lineWidth = w;
+  g2d.lineCap = 'round';
+  g2d.lineJoin = 'round';
+  if (blur) { g2d.shadowBlur = blur; g2d.shadowColor = blurColor || color; }
+  g2d.beginPath();
+  g2d.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) g2d.lineTo(pts[i][0], pts[i][1]);
+  g2d.stroke();
+  g2d.shadowBlur = 0;
+}
+
+function drawHead(x, y, r, ang, color, hair) {
+  // skull
+  g2d.fillStyle = '#11131f';
+  g2d.strokeStyle = color;
+  g2d.lineWidth = 1.6;
+  g2d.beginPath();
+  g2d.arc(x, y, r, 0, Math.PI * 2);
+  g2d.fill(); g2d.stroke();
+  if (hair) {
+    // long metal hair: strands sweeping back, following the headbang
+    g2d.strokeStyle = color;
+    g2d.lineWidth = 1.4;
+    g2d.globalAlpha = 0.75;
+    for (let i = 0; i < 4; i++) {
+      // strands start at the back of the skull and sweep down-left
+      const sx = x - r * (0.55 + i * 0.12);
+      const sy = y - r * (0.75 - i * 0.3);
+      const swing = hair.swing * (1 + i * 0.25);
+      g2d.beginPath();
+      g2d.moveTo(sx, sy);
+      g2d.quadraticCurveTo(
+        sx - hair.back * (8 + i * 3) + swing * 6,
+        sy + 8 + i * 3,
+        sx - hair.back * (11 + i * 4) + swing * 14,
+        sy + hair.len + i * 4
+      );
+      g2d.stroke();
+    }
+    g2d.globalAlpha = 1;
+  }
+}
+
+const BODY = '#181b2c';
+
+function drawLegs(cx, hipY, floorY, s, spread, bob) {
+  strokeLine([[cx - 1 * s, hipY], [cx - spread * s, hipY + (floorY - hipY) * 0.55 + bob], [cx - spread * 1.15 * s, floorY]], 5 * s, BODY);
+  strokeLine([[cx + 1 * s, hipY], [cx + spread * s, hipY + (floorY - hipY) * 0.55 + bob], [cx + spread * 1.15 * s, floorY]], 5 * s, BODY);
+}
+
+/* --- guitarist / bassist: shared rig, different instrument + feel --- */
+function drawStringPlayer(tr, colX, colW, stageTop, floorY, tNow, kind) {
+  const cx = colX + colW / 2;
+  const s = (floorY - stageTop) / 150;
+
+  const isBass = kind === 'bass';
+  const isLead = kind === 'lead';
+  const strum = env(tNow, tr._lastHit, 16);
+  const accent = env(tNow, tr._accent, 3);
+  const beat = (tNow / (STEP * 4)) % 1;
+
+  // headbang: nodding on the beat, deeper after a chord stab / while chugging
+  const playEnv = env(tNow, tr._lastHit, 2.5);
+  const bangDepth = isBass ? 0.35 : 0.55 + accent * 0.7;
+  const nodPhase = isBass ? ((tNow / (STEP * 8)) % 1) : beat;
+  const bang = Math.pow(Math.max(Math.cos(nodPhase * Math.PI * 2), 0), 2) * bangDepth * playEnv;
+
+  // lead leans back during sustained vibrato notes
+  let lean = 0;
+  if (isLead && tr._active && tr._active.d > 0.3) {
+    lean = -Math.min((tNow - tr._active.t) / 0.5, 1) * 0.22;
+  }
+
+  const bob = bang * 4 * s;
+  const hipY = floorY - 52 * s + bob;
+  const shX = cx + Math.sin(lean) * 30 * s;
+  const shY = hipY - 30 * s + bang * 2 * s;
+
+  drawLegs(cx, hipY, floorY, s, isBass ? 13 : 10, bob);
+  // torso
+  strokeLine([[cx, hipY], [shX, shY]], 7 * s, BODY);
+
+  // head + hair
+  const headAng = lean + bang * 0.9;
+  const headX = shX + Math.sin(headAng) * 13 * s;
+  const headY = shY - Math.cos(headAng) * 13 * s;
+  drawHead(headX, headY, 7.5 * s, headAng, tr.color, {
+    back: 1, len: (isBass ? 26 : 20) * s, swing: bang,
+  });
+
+  // --- instrument: neck up-left, body at the right hip ---
+  const bodyPt = [shX + 12 * s, hipY - 4 * s];
+  const neckLen = (isBass ? 58 : 48) * s;
+  const neckAng = -2.6 + lean * 0.5; // pointing up-left
+  const tipPt = [bodyPt[0] + Math.cos(neckAng) * neckLen, bodyPt[1] + Math.sin(neckAng) * neckLen];
+
+  // strap
+  strokeLine([[shX - 4 * s, shY], [bodyPt[0], bodyPt[1]]], 2 * s, 'rgba(120,130,170,0.35)');
+
+  // guitar body silhouette
+  g2d.fillStyle = '#0d0f1c';
+  g2d.strokeStyle = tr.color;
+  g2d.lineWidth = 1.6;
+  g2d.shadowBlur = 6 + strum * 14;
+  g2d.shadowColor = tr.color;
+  g2d.beginPath();
+  if (isBass) { // offset double-cut bass body
+    g2d.ellipse(bodyPt[0] + 3 * s, bodyPt[1] + 2 * s, 10 * s, 8 * s, neckAng, 0, Math.PI * 2);
+    g2d.ellipse(bodyPt[0] - 4 * s, bodyPt[1] - 2 * s, 7 * s, 6 * s, neckAng, 0, Math.PI * 2);
+    g2d.fillStyle = '#232743';
+  } else { // flying V
+    const a = neckAng + Math.PI; // away from the neck
+    const vx = Math.cos(a), vy = Math.sin(a);
+    const px = -vy, py = vx;
+    g2d.moveTo(bodyPt[0] - vx * 6 * s, bodyPt[1] - vy * 6 * s);
+    g2d.lineTo(bodyPt[0] + vx * 20 * s + px * 12 * s, bodyPt[1] + vy * 20 * s + py * 12 * s);
+    g2d.lineTo(bodyPt[0] + vx * 8 * s, bodyPt[1] + vy * 8 * s);
+    g2d.lineTo(bodyPt[0] + vx * 20 * s - px * 12 * s, bodyPt[1] + vy * 20 * s - py * 12 * s);
+    g2d.closePath();
+  }
+  g2d.fill(); g2d.stroke();
+  g2d.shadowBlur = 0;
+
+  // neck + a faint string in the instrument's color
+  strokeLine([bodyPt, tipPt], 3.2 * s, '#3a3f5c');
+  strokeLine([bodyPt, tipPt], 0.8 * s, tr.glow + '0.5)');
+
+  // fret hand: position along the neck follows the pitch being played
+  let fr = 0.5;
+  if (tr._lastNote) fr = (tr._lastNote.m - tr.lo) / (tr.hi - tr.lo);
+  const fpos = 0.92 - fr * 0.55; // higher note -> closer to the body
+  const fx = bodyPt[0] + (tipPt[0] - bodyPt[0]) * fpos;
+  const fy = bodyPt[1] + (tipPt[1] - bodyPt[1]) * fpos;
+  strokeLine([[shX - 6 * s, shY + 2 * s], [fx, fy]], 4 * s, BODY);
+  g2d.fillStyle = tr.color;
+  g2d.beginPath(); g2d.arc(fx, fy, 2.6 * s, 0, Math.PI * 2); g2d.fill();
+
+  // strum hand: swings down through the strings on every hit
+  const sx = bodyPt[0] + 2 * s;
+  const sy = bodyPt[1] - 10 * s + strum * 16 * s;
+  strokeLine([[shX + 5 * s, shY + 3 * s], [sx + 4 * s, sy - (6 * s) * (1 - strum)], [sx, sy]], 4 * s, BODY);
+  g2d.fillStyle = tr.color;
+  g2d.beginPath(); g2d.arc(sx, sy, 2.6 * s, 0, Math.PI * 2); g2d.fill();
+}
+
+/* --- drummer with a drawn kit; sticks hit the right piece on time --- */
+function kitLayout(colX, colW, stageTop, floorY) {
+  const pad = 14;
+  const px = f => colX + pad + f * (colW - pad * 2);
+  const sh = floorY - stageTop;
+  return {
+    H: { x: px(KIT_FRAC.H), y: stageTop + sh * 0.38 },
+    S: { x: px(KIT_FRAC.S), y: stageTop + sh * 0.60 },
+    K: { x: px(KIT_FRAC.K), y: floorY - 26 },
+    T: { x: px(KIT_FRAC.T), y: stageTop + sh * 0.46 },
+    C: { x: px(KIT_FRAC.C), y: stageTop + sh * 0.22 },
+  };
+}
+
+function drawCymbal(x, y, rx, glowE, color, tilt) {
+  strokeLine([[x, floorYG], [x, y + 3]], 2.5, '#262a40'); // stand
+  g2d.fillStyle = '#1d2033';
+  g2d.strokeStyle = color;
+  g2d.lineWidth = 1.6;
+  g2d.shadowBlur = glowE * 22;
+  g2d.shadowColor = color;
+  g2d.beginPath();
+  g2d.ellipse(x, y, rx, rx * 0.22, tilt + glowE * 0.12, 0, Math.PI * 2);
+  g2d.fill(); g2d.stroke();
+  g2d.shadowBlur = 0;
+}
+
+let floorYG = 0; // shared with drawCymbal for stands
+
+function drawDrummer(tr, colX, colW, stageTop, floorY, tNow) {
+  const kit = kitLayout(colX, colW, stageTop, floorY);
+  const s = (floorY - stageTop) / 150;
+  floorYG = floorY;
+  const color = tr.color;
+
+  const eK = env(tNow, tr._laneHit.K, 14);
+  const eS = env(tNow, tr._laneHit.S, 12);
+  const eH = env(tNow, tr._laneHit.H, 14);
+  const eT = env(tNow, tr._laneHit.T, 12);
+  const eC = env(tNow, tr._laneHit.C, 3.5);
+
+  /* --- kit rear pieces first, then the drummer, then the kick in front --- */
+  // hi-hat: two discs on a stand
+  drawCymbal(kit.H.x, kit.H.y, 11 * s, eH, color, -0.05);
+  drawCymbal(kit.H.x, kit.H.y + 4 + (1 - eH) * 2, 11 * s, eH * 0.5, color, 0.05);
+
+  // crash: bigger, tilted
+  drawCymbal(kit.C.x, kit.C.y, 16 * s, eC, color, -0.18);
+
+  // snare + tom: cylinders
+  function drum(x, y, rx, ry, e) {
+    strokeLine([[x - rx * 0.7, floorY], [x - rx * 0.4, y + ry]], 2, '#262a40');
+    strokeLine([[x + rx * 0.7, floorY], [x + rx * 0.4, y + ry]], 2, '#262a40');
+    g2d.fillStyle = '#161929';
+    g2d.strokeStyle = color;
+    g2d.lineWidth = 1.6;
+    g2d.shadowBlur = e * 20;
+    g2d.shadowColor = color;
+    roundRect(x - rx, y - ry, rx * 2, ry * 2, 3);
+    g2d.fill(); g2d.stroke();
+    g2d.beginPath();
+    g2d.ellipse(x, y - ry, rx, rx * 0.25, 0, 0, Math.PI * 2);
+    g2d.fillStyle = e > 0.4 ? color : '#222639';
+    g2d.fill(); g2d.stroke();
+    g2d.shadowBlur = 0;
+  }
+  drum(kit.S.x, kit.S.y, 12 * s, 7 * s, eS);
+  drum(kit.T.x, kit.T.y, 10 * s, 8 * s, eT);
+
+  /* drummer sits behind the kick, head and sticks above the kit */
+  const cx = kit.K.x;
+  const beat = (tNow / (STEP * 4)) % 1;
+  const playEnv = env(tNow, tr._lastHit, 2.5);
+  const bob = (Math.pow(Math.max(Math.cos(beat * Math.PI * 2), 0), 2) * 0.5 * playEnv + eK * 0.25) * 5 * s;
+  const hipY = floorY - 48 * s;
+  const shY = hipY - 38 * s + bob;
+
+  strokeLine([[cx, hipY], [cx, shY]], 7 * s, BODY);
+  drawHead(cx, shY - 11 * s + bob * 0.5, 7 * s, bob * 0.12, color, { back: 0.6, len: 18 * s, swing: bob * 0.15 });
+
+  // arms: left covers hat + snare, right covers tom + crash; rest above snare/tom
+  const shL = [cx - 9 * s, shY + 4 * s];
+  const shR = [cx + 9 * s, shY + 4 * s];
+  const restL = [kit.S.x + 8 * s, kit.S.y - 16 * s];
+  const restR = [kit.T.x - 8 * s, kit.T.y - 16 * s];
+
+  function arm(sh, rest, targets) {
+    // swing the stick toward the most recently hit piece
+    let best = null, bestE = 0;
+    for (const [piece, e] of targets) {
+      if (e > bestE) { bestE = e; best = piece; }
+    }
+    let tip = rest;
+    if (best && bestE > 0.05) {
+      const k = kit[best];
+      const target = [k.x, k.y - 6];
+      const f = Math.min(bestE * 1.6, 1);
+      tip = [rest[0] + (target[0] - rest[0]) * f, rest[1] + (target[1] - rest[1]) * f];
+    }
+    const elbow = [(sh[0] + tip[0]) / 2, (sh[1] + tip[1]) / 2 - 5 * s];
+    strokeLine([sh, elbow, tip], 4 * s, BODY);
+    strokeLine([tip, [tip[0] + (tip[0] - elbow[0]) * 0.7, tip[1] + (tip[1] - elbow[1]) * 0.7]], 2 * s, '#c9cee0');
+  }
+  arm(shL, restL, [['H', eH], ['S', eS]]);
+  arm(shR, restR, [['T', eT], ['C', eC * 3]]);
+
+  // kick drum: big circle, front and center, flashes on the double kick
+  g2d.fillStyle = '#10121f';
+  g2d.strokeStyle = color;
+  g2d.lineWidth = 2;
+  g2d.shadowBlur = eK * 26;
+  g2d.shadowColor = color;
+  g2d.beginPath();
+  g2d.arc(kit.K.x, kit.K.y, 20 * s, 0, Math.PI * 2);
+  g2d.fill(); g2d.stroke();
+  g2d.beginPath();
+  g2d.arc(kit.K.x, kit.K.y, 20 * s * (0.55 + eK * 0.12), 0, Math.PI * 2);
+  g2d.strokeStyle = tr.glow + (0.35 + eK * 0.6) + ')';
+  g2d.stroke();
+  g2d.shadowBlur = 0;
+}
+
+/* ---------------- Main frame ---------------- */
+
 let lastFrame = 0;
 
 function frame(ts) {
@@ -492,8 +927,11 @@ function frame(ts) {
   lastFrame = ts;
 
   const tNow = Math.max(0, Math.min(songTime(), SONG_DUR + 2));
-  const hitY = H * 0.78;
+  const hitY = H * 0.7;
+  const floorY = H - 16;
   const pps = hitY / FALL; // pixels per second of fall
+
+  for (const tr of TRACKS) updatePerf(tr, tNow);
 
   // background
   const bg = g2d.createLinearGradient(0, 0, 0, H);
@@ -513,18 +951,16 @@ function frame(ts) {
     g2d.beginPath(); g2d.moveTo(0, y); g2d.lineTo(W, y); g2d.stroke();
   }
 
-  // columns
+  // columns of falling notes
   let colX = 0;
   for (const tr of TRACKS) {
     const colW = W * tr.w;
     tr._x = colX; tr._w = colW;
 
-    // column separator
     g2d.strokeStyle = 'rgba(120,130,170,0.12)';
     g2d.lineWidth = 1;
     g2d.beginPath(); g2d.moveTo(colX, 0); g2d.lineTo(colX, H); g2d.stroke();
 
-    // notes
     for (const n of tr.notes) {
       const headT = n.t, tailT = n.t + Math.max(n.d, 0.12);
       if (tailT < tNow || headT > tNow + FALL) continue;
@@ -546,14 +982,13 @@ function frame(ts) {
       g2d.globalAlpha = 1;
       g2d.shadowBlur = 0;
 
-      // inner highlight stripe
       g2d.fillStyle = 'rgba(255,255,255,0.28)';
       roundRect(x + w * 0.25, top + 2, w * 0.18, Math.max(bottom - top - 4, 2), 2);
       g2d.fill();
 
       if (!n.hit && tNow >= headT && playing) {
         n.hit = true;
-        spawnSparks(x + w / 2, hitY, tr.color);
+        spawnSparks(x + w / 2, hitY, tr.color, n.acc);
       }
     }
 
@@ -568,62 +1003,34 @@ function frame(ts) {
   g2d.fillStyle = hl;
   g2d.fillRect(0, hitY - 3, W, 6);
 
-  // instrument decks
+  /* ---- the stage ---- */
+  g2d.fillStyle = 'rgba(11,13,23,0.92)';
+  g2d.fillRect(0, hitY, W, H - hitY);
+  g2d.strokeStyle = 'rgba(120,130,170,0.25)';
+  g2d.lineWidth = 1;
+  g2d.beginPath(); g2d.moveTo(0, floorY); g2d.lineTo(W, floorY); g2d.stroke();
+
   for (const tr of TRACKS) {
     const colX = tr._x, colW = tr._w;
-    const deckTop = hitY;
+    const cx = colX + colW / 2;
 
-    g2d.fillStyle = 'rgba(13,15,26,0.9)';
-    g2d.fillRect(colX, deckTop, colW, H - deckTop);
+    // spotlight pulsing with hits
+    const hitE = env(tNow, tr._lastHit, 6);
+    const spot = g2d.createRadialGradient(cx, hitY, 6, cx, hitY, (H - hitY) * 1.15);
+    spot.addColorStop(0, tr.glow + (0.16 + hitE * 0.2) + ')');
+    spot.addColorStop(1, tr.glow + '0)');
+    g2d.fillStyle = spot;
+    g2d.fillRect(colX, hitY, colW, H - hitY);
 
-    if (tr.drums) {
-      const pad = 14;
-      const laneW = (colW - pad * 2) / DRUM_LANES.length;
-      for (let i = 0; i < DRUM_LANES.length; i++) {
-        const cx = colX + pad + i * laneW + laneW / 2;
-        const cy = deckTop + (H - deckTop) * 0.42;
-        const rad = Math.min(laneW * 0.32, 26);
-        const active = tr.notes.some(n => n.lane === i && tNow >= n.t && tNow < n.t + 0.15);
-        g2d.beginPath();
-        g2d.arc(cx, cy, rad, 0, Math.PI * 2);
-        g2d.fillStyle = active ? tr.color : '#1a1d2e';
-        g2d.shadowColor = tr.color;
-        g2d.shadowBlur = active ? 26 : 0;
-        g2d.fill();
-        g2d.shadowBlur = 0;
-        g2d.strokeStyle = tr.glow + '0.5)';
-        g2d.lineWidth = 1.5;
-        g2d.stroke();
-        g2d.fillStyle = active ? '#0c0e1a' : '#8b90a3';
-        g2d.font = '600 9px "Segoe UI", sans-serif';
-        g2d.textAlign = 'center';
-        g2d.fillText(DRUM_LABEL[DRUM_LANES[i]], cx, cy + rad + 14);
-      }
-    } else {
-      // "strings" + glowing pads where notes land
-      const strings = tr.name === 'BASS' ? 4 : 6;
-      for (let i = 0; i < strings; i++) {
-        const sy = deckTop + 18 + i * ((H - deckTop - 40) / Math.max(strings - 1, 1));
-        g2d.strokeStyle = 'rgba(150,155,180,0.22)';
-        g2d.lineWidth = 0.5 + i * 0.25;
-        g2d.beginPath(); g2d.moveTo(colX + 14, sy); g2d.lineTo(colX + colW - 14, sy); g2d.stroke();
-      }
-      for (const n of tr.notes) {
-        if (!(tNow >= n.t && tNow < n.t + Math.max(n.d, 0.15))) continue;
-        const { x, w } = noteX(tr, n, colX, colW);
-        const grad = g2d.createRadialGradient(x + w / 2, deckTop + 8, 2, x + w / 2, deckTop + 8, 36);
-        grad.addColorStop(0, tr.glow + '0.85)');
-        grad.addColorStop(1, tr.glow + '0)');
-        g2d.fillStyle = grad;
-        g2d.fillRect(x + w / 2 - 36, deckTop, 72, 72);
-      }
-    }
+    if (tr.drums) drawDrummer(tr, colX, colW, hitY + 8, floorY, tNow);
+    else if (tr.name === 'BASS') drawStringPlayer(tr, colX, colW, hitY + 8, floorY, tNow, 'bass');
+    else if (tr.name === 'LEAD GUITAR') drawStringPlayer(tr, colX, colW, hitY + 8, floorY, tNow, 'lead');
+    else drawStringPlayer(tr, colX, colW, hitY + 8, floorY, tNow, 'rhythm');
 
-    // label
     g2d.fillStyle = tr.color;
-    g2d.font = '700 11px "Segoe UI", sans-serif';
+    g2d.font = '700 10px "Segoe UI", sans-serif';
     g2d.textAlign = 'center';
-    g2d.fillText(tr.name, colX + colW / 2, H - 12);
+    g2d.fillText(tr.name, cx, H - 4);
   }
 
   // particles
