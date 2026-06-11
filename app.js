@@ -221,6 +221,8 @@ for (const tr of TRACKS) {
 
 let ctx = null, master = null, busses = null, noiseBuf = null;
 let hatBuf = null, crashBuf = null, reverbSend = null;
+let PW25 = null; // 25%-duty pulse wave for the chip rhythm guitar
+let soundMode = 'chip'; // 'chip' (8-bit) or 'metal' (amp sim)
 
 function distCurve(k) {
   const n = 2048, c = new Float32Array(n);
@@ -347,6 +349,28 @@ function initAudio() {
   dly.connect(wet); wet.connect(master);
   const leadVerb = ctx.createGain(); leadVerb.gain.value = 0.2;
   busses.lead.out.connect(leadVerb); leadVerb.connect(reverbSend);
+
+  /* --- chip (8-bit) busses: clean gains, softened top end --- */
+  // 25%-duty pulse: imag[n] = (4/nπ)·sin(nπ·duty), band-limited to 32 harmonics
+  const N = 32;
+  const real = new Float32Array(N + 1), imag = new Float32Array(N + 1);
+  for (let n = 1; n <= N; n++) imag[n] = (4 / (n * Math.PI)) * Math.sin(n * Math.PI * 0.25);
+  PW25 = ctx.createPeriodicWave(real, imag);
+
+  const chipBus = name => {
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 9000;
+    const g = ctx.createGain(); g.gain.value = 1;
+    g.connect(lp); lp.connect(master);
+    busses[name] = g;
+  };
+  chipBus('chipR'); chipBus('chipL'); chipBus('chipB');
+
+  // arcade echo on the chip lead
+  const cdly = ctx.createDelay(1); cdly.delayTime.value = STEP * 3;
+  const cfb = ctx.createGain(); cfb.gain.value = 0.3;
+  const cwet = ctx.createGain(); cwet.gain.value = 0.22;
+  busses.chipL.connect(cdly); cdly.connect(cfb); cfb.connect(cdly);
+  cdly.connect(cwet); cwet.connect(master);
 }
 
 /* --- Karplus-Strong plucked string, cached per (pitch, duration, articulation) --- */
@@ -412,14 +436,81 @@ function pluck(bus, t, midi, dur, { pm = false, vel = 1, vibrato = false, bass =
   src.start(t);
 }
 
+/* --- chip (8-bit) voices --- */
+function chipPulse(bus, t, midi, dur, { wave = null, pm = false, vel = 1, vibrato = false } = {}) {
+  const o = ctx.createOscillator();
+  if (wave) o.setPeriodicWave(wave); else o.type = 'square';
+  o.frequency.value = midiHz(midi);
+  // tiny pitch blip on the attack for punch
+  o.detune.setValueAtTime(45, t);
+  o.detune.linearRampToValueAtTime(0, t + 0.03);
+
+  const amp = 0.3 * vel;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(amp, t + 0.004);
+  if (pm) { // staccato chug
+    g.gain.setValueAtTime(amp, t + 0.05);
+    g.gain.linearRampToValueAtTime(0, t + 0.09);
+  } else {
+    g.gain.setValueAtTime(amp, t + 0.05);
+    g.gain.exponentialRampToValueAtTime(Math.max(amp * 0.35, 0.001), t + Math.max(dur, 0.12));
+    g.gain.linearRampToValueAtTime(0, t + dur + 0.06);
+  }
+
+  if (vibrato) {
+    const lfo = ctx.createOscillator(); lfo.frequency.value = 6;
+    const lg = ctx.createGain();
+    lg.gain.setValueAtTime(0, t);
+    lg.gain.linearRampToValueAtTime(22, t + 0.35); // cents
+    lfo.connect(lg); lg.connect(o.detune);
+    lfo.start(t); lfo.stop(t + dur + 0.1);
+  }
+
+  o.connect(g); g.connect(bus);
+  o.start(t); o.stop(t + dur + 0.12);
+}
+
+function chipBassNote(t, midi, dur, vel = 1) {
+  // NES-style triangle bass, played an octave up so it carries
+  const o = ctx.createOscillator(); o.type = 'triangle';
+  o.frequency.value = midiHz(midi + 12);
+  const g = ctx.createGain();
+  const amp = 0.65 * vel;
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(amp, t + 0.004);
+  g.gain.setValueAtTime(amp, t + Math.max(0.03, Math.min(dur, 0.16) - 0.03));
+  g.gain.linearRampToValueAtTime(0, t + Math.min(dur, 0.18));
+  o.connect(g); g.connect(busses.chipB);
+  o.start(t); o.stop(t + dur + 0.05);
+}
+
+/* --- mode-aware note dispatchers (the schedule calls these) --- */
+function playRhythm(at, m, dur, pm, vel) {
+  if (soundMode === 'metal') pluck(busses.rhythm, at, m, dur, { pm, vel });
+  else chipPulse(busses.chipR, at, m, dur, { wave: PW25, pm, vel });
+}
+function playLead(at, m, dur, vib) {
+  if (soundMode === 'metal') pluck(busses.lead, at, m, dur, { lead: true, vibrato: vib });
+  else chipPulse(busses.chipL, at, m, dur, { vel: 1.1, vibrato: vib });
+}
+function playBass(at, m, dur) {
+  if (soundMode === 'metal') pluck(busses.bass, at, m, dur, { bass: true, pm: dur <= 2 * STEP });
+  else chipBassNote(at, m, dur);
+}
+
 /* --- drums --- */
-function noiseHit(t, { hpFreq, bpFreq, bpQ = 0.9, dur, gain, verb = 0 }) {
+function noiseHit(t, { hpFreq, lpFreq, bpFreq, bpQ = 0.9, dur, gain, verb = 0 }) {
   const src = ctx.createBufferSource(); src.buffer = noiseBuf;
   src.loop = true;
   let node = src;
   if (hpFreq) {
     const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = hpFreq;
     node.connect(hp); node = hp;
+  }
+  if (lpFreq) {
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = lpFreq;
+    node.connect(lp); node = lp;
   }
   if (bpFreq) {
     const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = bpFreq; bp.Q.value = bpQ;
@@ -467,6 +558,7 @@ function tonalHit(t, { f0, f1, fallT, dur, gain, type = 'sine', verb = 0 }) {
 }
 
 function drumHit(p, t) {
+  if (soundMode === 'chip') return chipDrumHit(p, t);
   if (p === 'K') {
     tonalHit(t, { f0: 160, f1: 47, fallT: 0.07, dur: 0.24, gain: 1.05 });
     noiseHit(t, { hpFreq: 2000, dur: 0.02, gain: 0.5 });           // beater click
@@ -484,20 +576,37 @@ function drumHit(p, t) {
   }
 }
 
+/* NES-noise-channel-style kit */
+function chipDrumHit(p, t) {
+  if (p === 'K') {
+    tonalHit(t, { f0: 170, f1: 38, fallT: 0.05, dur: 0.13, gain: 1.0, type: 'triangle' });
+    noiseHit(t, { lpFreq: 420, dur: 0.05, gain: 0.6 });
+  } else if (p === 'S') {
+    noiseHit(t, { bpFreq: 2200, bpQ: 0.5, dur: 0.05, gain: 0.6 });
+    noiseHit(t, { hpFreq: 1200, dur: 0.11, gain: 0.45 });
+  } else if (p === 'H') {
+    noiseHit(t, { hpFreq: 9000, dur: 0.03, gain: 0.3 });
+  } else if (p === 'C') {
+    noiseHit(t, { hpFreq: 5500, dur: 0.6, gain: 0.45 });
+  } else if (p === 'T') {
+    tonalHit(t, { f0: 190, f1: 95, fallT: 0.1, dur: 0.16, gain: 0.7, type: 'square' });
+  }
+}
+
 /* --- flat, time-sorted list of everything to play --- */
 function buildSchedule() {
   const ev = [];
   for (const n of R) {
     const tones = n.ch ? [[n.m, 1], [n.m + 7, 0.8], [n.m + 12, 0.6]] : [[n.m, 1]];
     for (const [m, gv] of tones) {
-      ev.push({ t: n.s * STEP, fire: at => pluck(busses.rhythm, at, m, n.d * STEP, { pm: n.pm, vel: n.v * gv }) });
+      ev.push({ t: n.s * STEP, fire: at => playRhythm(at, m, n.d * STEP, n.pm, n.v * gv) });
     }
   }
   for (const n of L) {
-    ev.push({ t: n.s * STEP, fire: at => pluck(busses.lead, at, n.m, n.d * STEP, { lead: true, vibrato: n.d >= 6 }) });
+    ev.push({ t: n.s * STEP, fire: at => playLead(at, n.m, n.d * STEP, n.d >= 6) });
   }
   for (const n of BS) {
-    ev.push({ t: n.s * STEP, fire: at => pluck(busses.bass, at, n.m, n.d * STEP, { bass: true, pm: n.d <= 2 }) });
+    ev.push({ t: n.s * STEP, fire: at => playBass(at, n.m, n.d * STEP) });
   }
   for (const n of DRm) {
     ev.push({ t: n.s * STEP, fire: at => drumHit(n.p, at) });
@@ -663,9 +772,9 @@ function strokeLine(pts, w, color, blur = 0, blurColor = null) {
 
 function drawHead(x, y, r, ang, color, hair) {
   // skull
-  g2d.fillStyle = '#11131f';
+  g2d.fillStyle = '#222640';
   g2d.strokeStyle = color;
-  g2d.lineWidth = 1.6;
+  g2d.lineWidth = 2.2;
   g2d.beginPath();
   g2d.arc(x, y, r, 0, Math.PI * 2);
   g2d.fill(); g2d.stroke();
@@ -693,17 +802,23 @@ function drawHead(x, y, r, ang, color, hair) {
   }
 }
 
-const BODY = '#181b2c';
+const BODY = '#3f4566';
+let bodyGlow = '#ffffff'; // set per character before drawing
+
+function bodyStroke(pts, w) {
+  strokeLine(pts, w, BODY, 9, bodyGlow);
+}
 
 function drawLegs(cx, hipY, floorY, s, spread, bob) {
-  strokeLine([[cx - 1 * s, hipY], [cx - spread * s, hipY + (floorY - hipY) * 0.55 + bob], [cx - spread * 1.15 * s, floorY]], 5 * s, BODY);
-  strokeLine([[cx + 1 * s, hipY], [cx + spread * s, hipY + (floorY - hipY) * 0.55 + bob], [cx + spread * 1.15 * s, floorY]], 5 * s, BODY);
+  bodyStroke([[cx - 1 * s, hipY], [cx - spread * s, hipY + (floorY - hipY) * 0.55 + bob], [cx - spread * 1.15 * s, floorY]], 5 * s);
+  bodyStroke([[cx + 1 * s, hipY], [cx + spread * s, hipY + (floorY - hipY) * 0.55 + bob], [cx + spread * 1.15 * s, floorY]], 5 * s);
 }
 
 /* --- guitarist / bassist: shared rig, different instrument + feel --- */
 function drawStringPlayer(tr, colX, colW, stageTop, floorY, tNow, kind) {
+  bodyGlow = tr.color;
   const cx = colX + colW / 2;
-  const s = (floorY - stageTop) / 150;
+  const s = (floorY - stageTop) / 132;
 
   const isBass = kind === 'bass';
   const isLead = kind === 'lead';
@@ -730,7 +845,7 @@ function drawStringPlayer(tr, colX, colW, stageTop, floorY, tNow, kind) {
 
   drawLegs(cx, hipY, floorY, s, isBass ? 13 : 10, bob);
   // torso
-  strokeLine([[cx, hipY], [shX, shY]], 7 * s, BODY);
+  bodyStroke([[cx, hipY], [shX, shY]], 7 * s);
 
   // head + hair
   const headAng = lean + bang * 0.9;
@@ -783,14 +898,14 @@ function drawStringPlayer(tr, colX, colW, stageTop, floorY, tNow, kind) {
   const fpos = 0.92 - fr * 0.55; // higher note -> closer to the body
   const fx = bodyPt[0] + (tipPt[0] - bodyPt[0]) * fpos;
   const fy = bodyPt[1] + (tipPt[1] - bodyPt[1]) * fpos;
-  strokeLine([[shX - 6 * s, shY + 2 * s], [fx, fy]], 4 * s, BODY);
+  bodyStroke([[shX - 6 * s, shY + 2 * s], [fx, fy]], 4 * s);
   g2d.fillStyle = tr.color;
   g2d.beginPath(); g2d.arc(fx, fy, 2.6 * s, 0, Math.PI * 2); g2d.fill();
 
   // strum hand: swings down through the strings on every hit
   const sx = bodyPt[0] + 2 * s;
   const sy = bodyPt[1] - 10 * s + strum * 16 * s;
-  strokeLine([[shX + 5 * s, shY + 3 * s], [sx + 4 * s, sy - (6 * s) * (1 - strum)], [sx, sy]], 4 * s, BODY);
+  bodyStroke([[shX + 5 * s, shY + 3 * s], [sx + 4 * s, sy - (6 * s) * (1 - strum)], [sx, sy]], 4 * s);
   g2d.fillStyle = tr.color;
   g2d.beginPath(); g2d.arc(sx, sy, 2.6 * s, 0, Math.PI * 2); g2d.fill();
 }
@@ -826,7 +941,8 @@ let floorYG = 0; // shared with drawCymbal for stands
 
 function drawDrummer(tr, colX, colW, stageTop, floorY, tNow) {
   const kit = kitLayout(colX, colW, stageTop, floorY);
-  const s = (floorY - stageTop) / 150;
+  bodyGlow = tr.color;
+  const s = (floorY - stageTop) / 132;
   floorYG = floorY;
   const color = tr.color;
 
@@ -872,7 +988,7 @@ function drawDrummer(tr, colX, colW, stageTop, floorY, tNow) {
   const hipY = floorY - 48 * s;
   const shY = hipY - 38 * s + bob;
 
-  strokeLine([[cx, hipY], [cx, shY]], 7 * s, BODY);
+  bodyStroke([[cx, hipY], [cx, shY]], 7 * s);
   drawHead(cx, shY - 11 * s + bob * 0.5, 7 * s, bob * 0.12, color, { back: 0.6, len: 18 * s, swing: bob * 0.15 });
 
   // arms: left covers hat + snare, right covers tom + crash; rest above snare/tom
@@ -895,7 +1011,7 @@ function drawDrummer(tr, colX, colW, stageTop, floorY, tNow) {
       tip = [rest[0] + (target[0] - rest[0]) * f, rest[1] + (target[1] - rest[1]) * f];
     }
     const elbow = [(sh[0] + tip[0]) / 2, (sh[1] + tip[1]) / 2 - 5 * s];
-    strokeLine([sh, elbow, tip], 4 * s, BODY);
+    bodyStroke([sh, elbow, tip], 4 * s);
     strokeLine([tip, [tip[0] + (tip[0] - elbow[0]) * 0.7, tip[1] + (tip[1] - elbow[1]) * 0.7]], 2 * s, '#c9cee0');
   }
   arm(shL, restL, [['H', eH], ['S', eS]]);
@@ -1017,7 +1133,7 @@ function frame(ts) {
     // spotlight pulsing with hits
     const hitE = env(tNow, tr._lastHit, 6);
     const spot = g2d.createRadialGradient(cx, hitY, 6, cx, hitY, (H - hitY) * 1.15);
-    spot.addColorStop(0, tr.glow + (0.16 + hitE * 0.2) + ')');
+    spot.addColorStop(0, tr.glow + (0.24 + hitE * 0.25) + ')');
     spot.addColorStop(1, tr.glow + '0)');
     g2d.fillStyle = spot;
     g2d.fillRect(colX, hitY, colW, H - hitY);
@@ -1067,6 +1183,10 @@ document.getElementById('start').addEventListener('click', begin);
 document.getElementById('btnPlay').addEventListener('click', () => { if (started) setPlaying(!playing); });
 document.getElementById('btnRestart').addEventListener('click', () => { if (started) restart(); });
 document.getElementById('vol').addEventListener('input', e => { if (master) master.gain.value = parseFloat(e.target.value); });
+document.getElementById('btnSound').addEventListener('click', e => {
+  soundMode = soundMode === 'chip' ? 'metal' : 'chip';
+  e.target.textContent = soundMode === 'chip' ? '8-BIT' : 'METAL';
+});
 window.addEventListener('keydown', e => {
   if (e.code === 'Space' && started) { e.preventDefault(); setPlaying(!playing); }
 });

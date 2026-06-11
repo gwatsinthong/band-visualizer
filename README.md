@@ -46,11 +46,13 @@ Each instrument has a character on stage, animated entirely from the note data:
 
 - **Composition** — the song is written as step-sequencer data (16th-note grid at 160 BPM)
   in `app.js`, built up from riff/beat helper functions.
-- **Sound** — guitars and bass are **Karplus-Strong plucked strings** (palm mutes are
-  heavily damped, open chords ring) fed through a tanh `WaveShaperNode` amp with a cab-sim
-  EQ (mid scoop, presence peak, high rolloff). Drums are tuned sine drops with noise
-  transients; hats and crash are banks of inharmonic square waves (808-style); snare,
-  toms, cymbals and lead get a generated-impulse-response convolver reverb.
+- **Sound** — two engines, switchable live with the **8-BIT / METAL** button:
+  - **8-bit (default)** — video-game-style chiptune metal: 25%-duty pulse-wave rhythm
+    chords, square-wave lead with vibrato and arcade echo, NES-style triangle bass, and
+    noise-channel drums. Punchy and clean by construction.
+  - **Metal (amp sim)** — **Karplus-Strong plucked strings** (palm mutes heavily damped,
+    open chords ring) through a tanh `WaveShaperNode` amp with cab-sim EQ; 808-style
+    square-bank cymbals; generated-impulse-response convolver reverb.
 - **Visuals** — a single `<canvas>` renders the falling notes (lookahead of 2.4 s), moving
   beat grid, hit-line sparks, pulsing spotlights, and the four performers.
 - **Sync** — audio is scheduled with the standard Web Audio lookahead-scheduler pattern, and
@@ -61,5 +63,6 @@ Each instrument has a character on stage, animated entirely from the note data:
 
 - **Space / ⏸ button** — play / pause
 - **⏮** — restart
+- **8-BIT / METAL** — switch the sound engine on the fly
 - **LOOP** — toggle looping
 - **VOL** — master volume
