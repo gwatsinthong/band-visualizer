@@ -322,11 +322,13 @@ const DRUM_LABEL = { K: 'KICK', S: 'SNARE', H: 'HAT', T: 'TOM', C: 'CRASH' };
 // where each drum lane sits across the column — matches the drawn kit
 const KIT_FRAC = { H: 0.13, S: 0.32, K: 0.52, T: 0.68, C: 0.87 };
 
+// w: column share on wide screens; wn: on narrow screens, where the
+// drum kit (the widest figure) gets a bigger slice of the width
 const TRACKS = [
-  { name: 'RHYTHM GUITAR', color: '#f59e0b', glow: 'rgba(245,158,11,', notes: [], w: 0.29 },
-  { name: 'LEAD GUITAR', color: '#22d3ee', glow: 'rgba(34,211,238,', notes: [], w: 0.29 },
-  { name: 'BASS', color: '#a78bfa', glow: 'rgba(167,139,250,', notes: [], w: 0.2 },
-  { name: 'DRUMS', color: '#f43f5e', glow: 'rgba(244,63,94,', notes: [], w: 0.22, drums: true },
+  { name: 'RHYTHM GUITAR', color: '#f59e0b', glow: 'rgba(245,158,11,', notes: [], w: 0.29, wn: 0.24 },
+  { name: 'LEAD GUITAR', color: '#22d3ee', glow: 'rgba(34,211,238,', notes: [], w: 0.29, wn: 0.24 },
+  { name: 'BASS', color: '#a78bfa', glow: 'rgba(167,139,250,', notes: [], w: 0.2, wn: 0.24 },
+  { name: 'DRUMS', color: '#f43f5e', glow: 'rgba(244,63,94,', notes: [], w: 0.22, wn: 0.28, drums: true },
 ];
 
 let SONG_STEPS = 0, SONG_DUR = 0, LOOP_AT = 0, currentSong = 0;
@@ -1376,7 +1378,12 @@ function frame(ts) {
   lastFrame = ts;
 
   const tNow = Math.max(0, Math.min(songTime(), SONG_DUR + 2));
-  const hitY = H * 0.7;
+  // Band scale: height-driven, but capped by the drums column width so
+  // the kit isn't crammed on narrow screens (it needs ~150px of column
+  // per scale unit). Leftover space goes to the note highway.
+  const narrow = W < 760;
+  const sFit = Math.min((H * 0.3 - 24) / 132, (W * (narrow ? 0.28 : 0.22)) / 150);
+  const hitY = H - 24 - sFit * 132;
   const floorY = H - 16;
   const pps = hitY / FALL; // pixels per second of fall
 
@@ -1403,7 +1410,7 @@ function frame(ts) {
   // columns of falling notes
   let colX = 0;
   for (const tr of TRACKS) {
-    const colW = W * tr.w;
+    const colW = W * (narrow ? tr.wn : tr.w);
     tr._x = colX; tr._w = colW;
 
     g2d.strokeStyle = 'rgba(120,130,170,0.12)';
