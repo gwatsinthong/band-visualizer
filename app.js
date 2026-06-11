@@ -15,17 +15,15 @@
 
 /* ---------------- Song data ---------------- */
 
-const BPM = 160;
-const STEP = 60 / BPM / 4; // one 16th note, in seconds
-const BAR = 16;            // 16th-note steps per bar
+let BPM = 160;
+let STEP = 60 / BPM / 4;  // one 16th note, in seconds (recomputed per song)
+const BAR = 16;           // 16th-note steps per bar
 
 // pitches (MIDI)
 const E1 = 28, E2 = 40, G2 = 43, A2 = 45, Bb2 = 46, B2 = 47, C3 = 48, D3 = 50;
 
-const R = [];  // rhythm guitar {s, m, d, pm, ch, v}
-const L = [];  // lead guitar   {s, m, d}
-const BS = []; // bass          {s, m, d}
-const DRm = []; // drums        {s, p}
+// note buffers for the song currently being built / played
+let R = [], L = [], BS = [], DRm = [];
 
 const rn = (s, m, d, o = {}) => R.push({ s, m, d, pm: !!o.pm, ch: !!o.ch, v: o.v || 1 });
 const ln = (s, m, d) => L.push({ s, m, d });
@@ -69,6 +67,15 @@ function tomFill(bar) {
   dn(o + 12, 'T'); dn(o + 13, 'T'); dn(o + 14, 'T'); dn(o + 15, 'S');
 }
 
+function halfTimeBeat(bar, crash) { // groovy half-time: snare on beat 3
+  const o = bar * BAR;
+  dn(o, 'K'); dn(o + 3, 'K'); dn(o + 6, 'K'); dn(o + 8, 'S'); dn(o + 11, 'K'); dn(o + 13, 'K');
+  for (let i = 0; i < 16; i += 2) dn(o + i, 'H');
+  if (crash) dn(o, 'C');
+}
+
+/* ===== Song 1: "Kernel Panic" — E minor, galloping thrash ===== */
+function songKernelPanic() {
 /* --- intro: 4 bars, palm-muted 8ths building up --- */
 for (let bar = 0; bar < 3; bar++) {
   const o = bar * BAR;
@@ -174,9 +181,128 @@ tomFill(35);
   dn(o, 'K'); dn(o, 'C');
 }
 
-const SONG_STEPS = 37 * BAR;
-const SONG_DUR = SONG_STEPS * STEP;  // ~55.5 s
-const LOOP_AT = SONG_DUR + 1.2;      // let the last chord ring before looping
+  return 37 * BAR;
+}
+
+/* ===== Song 2: "Null Pointer" — A minor, melodic speed metal ===== */
+function songNullPointer() {
+  const A1 = 33, E2 = 40, F2 = 41, G2 = 43, A2 = 45, C3 = 48;
+
+  // straight palm-muted 8ths on a root
+  const chug = (bar, root) => {
+    const o = bar * BAR;
+    for (let i = 0; i < 8; i++) rn(o + i * 2, root, 2, { pm: 1, v: i === 0 ? 1 : 0.82 });
+    for (let i = 0; i < 8; i++) bn(o + i * 2, root - 12, 2);
+  };
+  // ringing power chord held across the bar
+  const ring = (bar, root) => {
+    const o = bar * BAR;
+    rn(o, root, 15, { ch: 1, v: 1.05 });
+    for (let i = 0; i < 8; i++) bn(o + i * 2, root - 12, 2);
+  };
+
+  const verse = [A2, A2, F2, G2, A2, A2, C3, E2];
+
+  // intro (0-3): chug on A, drums build in
+  for (let b = 0; b < 4; b++) {
+    chug(b, A2);
+    if (b >= 2) beatA(b, b === 2);
+    else { dn(b * BAR, 'K'); dn(b * BAR + 8, 'K'); for (let i = 0; i < 16; i += 2) dn(b * BAR + i, 'H'); }
+  }
+  tomFill(3);
+
+  // verse (4-11)
+  for (let i = 0; i < 8; i++) { chug(4 + i, verse[i]); beatA(4 + i, i === 0); }
+  tomFill(11);
+
+  // chorus + lead (12-19): held chords with a soaring melody
+  const chorus = [A2, A2, F2, G2, A2, C3, G2, E2];
+  for (let i = 0; i < 8; i++) { ring(12 + i, chorus[i]); beatA(12 + i, i % 2 === 0); }
+  const lead = [
+    [0, 76, 4], [4, 77, 4], [8, 76, 2], [10, 74, 2], [12, 72, 4],
+    [16, 74, 8], [24, 72, 4], [28, 71, 4],
+    [32, 72, 4], [36, 74, 4], [40, 76, 4], [44, 72, 4],
+    [48, 69, 12], [60, 71, 4],
+    [64, 76, 4], [68, 77, 4], [72, 79, 4], [76, 77, 4],
+    [80, 76, 8], [88, 74, 4], [92, 72, 4],
+    [96, 74, 4], [100, 72, 4], [104, 71, 4], [108, 69, 4],
+    [112, 71, 8], [120, 81, 8],
+  ];
+  for (const [s, m, d] of lead) ln(12 * BAR + s, m, d);
+
+  // solo (20-27): continuous pentatonic run over a double-kick chug
+  const sc = [69, 72, 74, 76, 79, 81, 79, 76]; // A minor pentatonic up/down
+  for (let b = 0; b < 8; b++) {
+    chug(20 + b, verse[b]);
+    beatDK(20 + b, b === 0);
+    for (let i = 0; i < 8; i++) ln((20 + b) * BAR + i * 2, sc[(i + b * 2) % sc.length] + (b >= 4 ? 12 : 0), 2);
+  }
+  tomFill(27);
+
+  // outro (28-31) + ring-out (32)
+  const out = [A2, F2, G2, A2];
+  for (let i = 0; i < 4; i++) { ring(28 + i, out[i]); beatDK(28 + i, true); }
+  ln(28 * BAR, 81, 16); ln(30 * BAR, 79, 8); ln(31 * BAR, 81, 16);
+  { const o = 32 * BAR; rn(o, A2, 16, { ch: 1, v: 1.1 }); bn(o, A1, 16); ln(o, 81, 16); dn(o, 'K'); dn(o, 'C'); }
+  return 33 * BAR;
+}
+
+/* ===== Song 3: "Stack Overflow" — E, half-time groove / breakdown ===== */
+function songStackOverflow() {
+  const E1 = 28, E2 = 40, Fs2 = 42, G2 = 43, A2 = 45, B2 = 47, C3 = 48;
+
+  // syncopated palm-muted groove on a root
+  const groove = (bar, root, pat) => {
+    const o = bar * BAR;
+    for (const s of pat) { rn(o + s, root, 1, { pm: 1, v: 1.15 }); bn(o + s, root - 12, 1); }
+  };
+  const patA = [0, 3, 4, 7, 8, 11, 14];
+  const patB = [0, 2, 3, 6, 8, 11, 12, 14];
+  const roots = [E2, E2, G2, Fs2, E2, A2, G2, Fs2];
+
+  // intro (0-1): two big chord swells
+  { rn(0, E2, 8, { ch: 1, v: 1.1 }); bn(0, E1, 8); dn(0, 'C'); dn(0, 'K');
+    rn(BAR, G2, 8, { ch: 1, v: 1.1 }); bn(BAR, G2 - 12, 8); dn(BAR, 'C'); dn(BAR, 'K'); }
+
+  // main groove (2-9)
+  for (let i = 0; i < 8; i++) { groove(2 + i, roots[i], i % 2 ? patB : patA); halfTimeBeat(2 + i, i === 0); }
+  tomFill(9);
+
+  // melodic mid section (10-17): bluesy lead over the groove
+  for (let i = 0; i < 8; i++) { groove(10 + i, roots[i], i % 2 ? patB : patA); halfTimeBeat(10 + i, i % 4 === 0); }
+  const lead = [
+    [0, 64, 6], [6, 67, 2], [8, 69, 8],
+    [16, 71, 6], [22, 69, 2], [24, 67, 4], [28, 64, 4],
+    [32, 71, 4], [36, 74, 4], [40, 76, 8], [48, 74, 4], [52, 71, 4], [56, 69, 8],
+    [64, 67, 4], [68, 69, 4], [72, 71, 4], [76, 74, 4],
+    [80, 76, 8], [88, 74, 4], [92, 71, 4], [96, 69, 8], [104, 67, 4], [108, 64, 4],
+    [112, 64, 16],
+  ];
+  for (const [s, m, d] of lead) ln(10 * BAR + s, m, d);
+
+  // breakdown (18-23): huge spaced chugs
+  const bd = [E2, E2, C3, B2, E2, G2];
+  for (let i = 0; i < 6; i++) {
+    const o = (18 + i) * BAR;
+    rn(o, bd[i], 3, { ch: 1, v: 1.3 }); bn(o, bd[i] - 12, 3);
+    rn(o + 6, bd[i], 3, { pm: 1, v: 1.2 }); bn(o + 6, bd[i] - 12, 3);
+    rn(o + 10, bd[i], 2, { pm: 1, v: 1.2 }); bn(o + 10, bd[i] - 12, 2);
+    dn(o, 'C'); dn(o, 'K'); dn(o + 6, 'K'); dn(o + 8, 'S'); dn(o + 10, 'K'); dn(o + 13, 'K');
+    for (let h = 0; h < 16; h += 4) dn(o + h, 'H');
+  }
+  tomFill(23);
+
+  // outro groove + ring-out (24-27)
+  for (let i = 0; i < 3; i++) { groove(24 + i, roots[i], patA); halfTimeBeat(24 + i, i === 0); }
+  { const o = 27 * BAR; rn(o, E2, 16, { ch: 1, v: 1.25 }); bn(o, E1, 16); ln(o, 76, 16); dn(o, 'K'); dn(o, 'C'); }
+  return 28 * BAR;
+}
+
+const SONGS = [
+  { name: 'KERNEL PANIC',   sub: 'E MINOR · 160 BPM · GALLOPING THRASH',         bpm: 160, build: songKernelPanic },
+  { name: 'NULL POINTER',   sub: 'A MINOR · 184 BPM · MELODIC SPEED METAL',      bpm: 184, build: songNullPointer },
+  { name: 'STACK OVERFLOW', sub: 'E · 140 BPM · HALF-TIME GROOVE / BREAKDOWN',   bpm: 140, build: songStackOverflow },
+];
 
 /* ---------------- Track / visual note model ---------------- */
 
@@ -197,22 +323,58 @@ const DRUM_LABEL = { K: 'KICK', S: 'SNARE', H: 'HAT', T: 'TOM', C: 'CRASH' };
 const KIT_FRAC = { H: 0.13, S: 0.32, K: 0.52, T: 0.68, C: 0.87 };
 
 const TRACKS = [
-  { name: 'RHYTHM GUITAR', color: '#f59e0b', glow: 'rgba(245,158,11,', notes: expandRhythm(), w: 0.29 },
-  { name: 'LEAD GUITAR', color: '#22d3ee', glow: 'rgba(34,211,238,', notes: L.map(n => ({ t: n.s * STEP, d: n.d * STEP, m: n.m })), w: 0.29 },
-  { name: 'BASS', color: '#a78bfa', glow: 'rgba(167,139,250,', notes: BS.map(n => ({ t: n.s * STEP, d: n.d * STEP, m: n.m })), w: 0.2 },
-  { name: 'DRUMS', color: '#f43f5e', glow: 'rgba(244,63,94,', notes: DRm.map(n => ({ t: n.s * STEP, d: 0.08, p: n.p, acc: n.p === 'C' })), w: 0.22, drums: true },
+  { name: 'RHYTHM GUITAR', color: '#f59e0b', glow: 'rgba(245,158,11,', notes: [], w: 0.29 },
+  { name: 'LEAD GUITAR', color: '#22d3ee', glow: 'rgba(34,211,238,', notes: [], w: 0.29 },
+  { name: 'BASS', color: '#a78bfa', glow: 'rgba(167,139,250,', notes: [], w: 0.2 },
+  { name: 'DRUMS', color: '#f43f5e', glow: 'rgba(244,63,94,', notes: [], w: 0.22, drums: true },
 ];
 
-for (const tr of TRACKS) {
-  tr.notes.sort((a, b) => a.t - b.t);
-  tr._ptr = 0;
-  tr._laneHit = {};
-  tr._lastT = -1;
-  if (!tr.drums) {
-    let lo = Infinity, hi = -Infinity;
-    for (const n of tr.notes) { lo = Math.min(lo, n.m); hi = Math.max(hi, n.m); }
-    tr.lo = lo - 1; tr.hi = hi + 1;
+let SONG_STEPS = 0, SONG_DUR = 0, LOOP_AT = 0, currentSong = 0;
+
+// rebuild each track's visual notes from the current R/L/BS/DRm + STEP
+function rebuildTracks() {
+  TRACKS[0].notes = expandRhythm();
+  TRACKS[1].notes = L.map(n => ({ t: n.s * STEP, d: n.d * STEP, m: n.m }));
+  TRACKS[2].notes = BS.map(n => ({ t: n.s * STEP, d: n.d * STEP, m: n.m }));
+  TRACKS[3].notes = DRm.map(n => ({ t: n.s * STEP, d: 0.08, p: n.p, acc: n.p === 'C' }));
+  for (const tr of TRACKS) {
+    tr.notes.sort((a, b) => a.t - b.t);
+    tr._ptr = 0;
+    tr._laneHit = {};
+    tr._lastT = -1;
+    tr._active = null;
+    tr._lastHit = tr._accent = tr._lastNote = undefined;
+    if (!tr.drums) {
+      let lo = Infinity, hi = -Infinity;
+      for (const n of tr.notes) { lo = Math.min(lo, n.m); hi = Math.max(hi, n.m); }
+      tr.lo = lo - 1; tr.hi = hi + 1;
+    }
   }
+}
+
+// build a song into R/L/BS/DRm and recompute timing/visuals
+function loadSong(i) {
+  currentSong = i;
+  const s = SONGS[i];
+  BPM = s.bpm; STEP = 60 / BPM / 4;
+  R = []; L = []; BS = []; DRm = [];
+  SONG_STEPS = s.build();
+  SONG_DUR = SONG_STEPS * STEP;
+  LOOP_AT = SONG_DUR + 1.2;
+  if (chipEcho) chipEcho.delayTime.value = STEP * 3;
+  rebuildTracks();
+  updateSongHUD();
+}
+
+function updateSongHUD() {
+  const s = SONGS[currentSong];
+  const t = document.getElementById('songTitle');
+  if (t) t.innerHTML = 'SEGFAULT <span>//</span> ' + s.name;
+  const sub = document.getElementById('songSub');
+  if (sub) sub.textContent = s.sub + ' · NO VOCALS';
+  document.querySelectorAll('#tracks .trk').forEach(b => {
+    b.classList.toggle('active', Number(b.dataset.i) === currentSong);
+  });
 }
 
 /* ============================================================
@@ -222,6 +384,7 @@ for (const tr of TRACKS) {
 let ctx = null, master = null, busses = null, noiseBuf = null;
 let hatBuf = null, crashBuf = null, reverbSend = null;
 let PW25 = null; // 25%-duty pulse wave for the chip rhythm guitar
+let chipEcho = null; // chip-lead delay node (retuned per song tempo)
 let soundMode = 'chip'; // 'chip' (8-bit) or 'metal' (amp sim)
 
 function distCurve(k) {
@@ -366,7 +529,7 @@ function initAudio() {
   chipBus('chipR'); chipBus('chipL'); chipBus('chipB');
 
   // arcade echo on the chip lead
-  const cdly = ctx.createDelay(1); cdly.delayTime.value = STEP * 3;
+  const cdly = ctx.createDelay(1); cdly.delayTime.value = STEP * 3; chipEcho = cdly;
   const cfb = ctx.createGain(); cfb.gain.value = 0.3;
   const cwet = ctx.createGain(); cwet.gain.value = 0.22;
   busses.chipL.connect(cdly); cdly.connect(cfb); cfb.connect(cdly);
@@ -665,11 +828,22 @@ function begin() {
   started = true;
   document.getElementById('start').style.display = 'none';
   initAudio();
+  if (chipEcho) chipEcho.delayTime.value = STEP * 3;
   schedule = buildSchedule();
   startCtxTime = ctx.currentTime + 0.6;
   playing = true;
   schedTimer = setInterval(schedulerTick, 25);
   requestAnimationFrame(frame);
+}
+
+// switch tracks; rebuilds the song and (if playing) the audio schedule
+function selectSong(i) {
+  if (i === currentSong) return;
+  loadSong(i);
+  if (started) {
+    schedule = buildSchedule();
+    restart(true);
+  }
 }
 
 /* ============================================================
@@ -1187,6 +1361,12 @@ document.getElementById('btnSound').addEventListener('click', e => {
   soundMode = soundMode === 'chip' ? 'metal' : 'chip';
   e.target.textContent = soundMode === 'chip' ? '8-BIT' : 'METAL';
 });
+document.querySelectorAll('#tracks .trk').forEach(b => {
+  b.addEventListener('click', () => selectSong(Number(b.dataset.i)));
+});
 window.addEventListener('keydown', e => {
   if (e.code === 'Space' && started) { e.preventDefault(); setPlaying(!playing); }
+  if (e.key >= '1' && e.key <= String(SONGS.length)) selectSong(Number(e.key) - 1);
 });
+
+loadSong(0); // populate the default track + HUD

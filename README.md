@@ -23,13 +23,21 @@ Four columns of falling notes, each landing on its instrument's "deck" at the hi
 
 | Column | Color | What it plays |
 |---|---|---|
-| Rhythm guitar | Amber | Palm-muted E-minor gallops, power-chord stabs, breakdown chugs |
-| Lead guitar | Cyan | Melody with vibrato + slap-back delay, octave climax, closing run |
+| Rhythm guitar | Amber | Palm-muted gallops, power-chord stabs, breakdown chugs |
+| Lead guitar | Cyan | Melody with vibrato + delay, octave climaxes, fast runs |
 | Bass | Purple | Locked to the rhythm guitar's roots, an octave down |
 | Drums | Red | Kick / snare / hi-hat / tom / crash lanes, double-kick sections |
 
-The track itself is ~56 seconds (loops by default): intro build → main riff → lead section →
-half-time breakdown → double-kick finale → ring-out.
+## Tracks
+
+Three original instrumentals, switchable live from the selector (top-left) or keys **1 / 2 / 3**.
+Switching rebuilds the band and restarts from the top; all loop by default.
+
+| # | Track | Feel |
+|---|---|---|
+| 1 | **Kernel Panic** | E minor · 160 BPM · galloping thrash — intro build → main riff → lead section → half-time breakdown → double-kick finale |
+| 2 | **Null Pointer** | A minor · 184 BPM · melodic speed metal — driving 8ths, a soaring chorus lead, and a pentatonic solo |
+| 3 | **Stack Overflow** | E · 140 BPM · half-time groove — syncopated chugs, a bluesy mid-section, and a heavy breakdown |
 
 ## The band
 
@@ -44,8 +52,9 @@ Each instrument has a character on stage, animated entirely from the note data:
 
 ## How it works
 
-- **Composition** — the song is written as step-sequencer data (16th-note grid at 160 BPM)
-  in `app.js`, built up from riff/beat helper functions.
+- **Composition** — each song is a builder function in `app.js` that writes step-sequencer
+  data (a 16th-note grid at the song's tempo) using shared riff/beat helpers. Switching
+  tracks reloads that data and rebuilds the audio schedule.
 - **Sound** — two engines, switchable live with the **8-BIT / METAL** button:
   - **8-bit (default)** — video-game-style chiptune metal: 25%-duty pulse-wave rhythm
     chords, square-wave lead with vibrato and arcade echo, NES-style triangle bass, and
@@ -61,6 +70,7 @@ Each instrument has a character on stage, animated entirely from the note data:
 
 ## Controls
 
+- **1 / 2 / 3** (or the selector) — switch tracks
 - **Space / ⏸ button** — play / pause
 - **⏮** — restart
 - **8-BIT / METAL** — switch the sound engine on the fly

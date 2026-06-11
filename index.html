@@ -16,6 +16,14 @@
   #hud h1 { font-size: 18px; letter-spacing: 4px; font-weight: 800; }
   #hud h1 span { color: #f59e0b; }
   #hud p { font-size: 11px; letter-spacing: 2px; color: #8b90a3; margin-top: 3px; }
+  #tracks { display: flex; gap: 6px; margin-top: 10px; pointer-events: auto; }
+  #tracks .trk {
+    background: rgba(13, 15, 26, 0.7); color: #8b90a3; border: 1px solid #232636;
+    border-radius: 7px; padding: 5px 10px; font-size: 10px; letter-spacing: 1px;
+    font-weight: 700; cursor: pointer; backdrop-filter: blur(6px); transition: all 0.12s ease;
+  }
+  #tracks .trk:hover { color: #e7e9f0; border-color: #3a3f5c; }
+  #tracks .trk.active { color: #05060a; background: #f59e0b; border-color: #f59e0b; }
 
   #controls {
     position: absolute; top: 14px; right: 18px; display: flex; gap: 8px; align-items: center;
@@ -53,8 +61,13 @@
   <canvas id="stage"></canvas>
 
   <div id="hud">
-    <h1>SEGFAULT <span>//</span> KERNEL PANIC</h1>
-    <p>SYNTHESIZED METAL &nbsp;·&nbsp; RHYTHM / LEAD / BASS / DRUMS &nbsp;·&nbsp; NO VOCALS</p>
+    <h1 id="songTitle">SEGFAULT <span>//</span> KERNEL PANIC</h1>
+    <p id="songSub">E MINOR · 160 BPM · GALLOPING THRASH · NO VOCALS</p>
+    <div id="tracks">
+      <button class="trk active" data-i="0">1 · KERNEL PANIC</button>
+      <button class="trk" data-i="1">2 · NULL POINTER</button>
+      <button class="trk" data-i="2">3 · STACK OVERFLOW</button>
+    </div>
   </div>
 
   <div id="controls">
