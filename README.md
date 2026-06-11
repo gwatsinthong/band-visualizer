@@ -9,8 +9,13 @@ and an animated character for each instrument performs on stage in sync with the
 
 ## Run it
 
-Open `index.html` in a browser (or serve the folder with `npx serve` / `python3 -m http.server`)
-and click play. Turn it up. 🤘
+It's plain static files — no build step, no dependencies. Either:
+
+- **Just open it:** double-click `index.html` (it runs fine over `file://`), or
+- **Serve it:** `npm run dev`, then open the printed URL (http://localhost:5173).
+  The dev server is a tiny zero-dependency Node script, so there's nothing to `npm install`.
+
+Then click play. Turn it up. 🤘
 
 ## What you're looking at
 

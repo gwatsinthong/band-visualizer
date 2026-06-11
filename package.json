@@ -1,0 +1,10 @@
+{
+  "name": "band-visualizer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SEGFAULT // Kernel Panic — a falling-notes visualizer for a synthesized metal band (rhythm/lead/bass/drums, no vocals).",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  }
+}
