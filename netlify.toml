@@ -1,0 +1,12 @@
+# Netlify configuration — this is a static site with no build step.
+# index.html lives at the repo root, so we just publish the root directory.
+
+[build]
+  publish = "."
+  # no build command: nothing to compile or bundle
+
+# Long-cache the immutable instrument samples.
+[[headers]]
+  for = "/sounds/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
