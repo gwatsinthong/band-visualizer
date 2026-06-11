@@ -88,7 +88,7 @@ no cookies — so no consent banner needed). To turn it on:
 
 1. Create a free account at goatcounter.com and pick a site code (e.g. `segfault-band`,
    giving you the dashboard at `segfault-band.goatcounter.com`).
-2. Open `index.html` and set `GOATCOUNTER_CODE = 'segfault-band'` (one line, near the top).
+2. Open `index.html` and set `GOATCOUNTER_CODE` to that code (one line, near the top).
 3. Deploy. Visits show up on your GoatCounter dashboard; localhost visits are ignored.
 
 Until a code is set, no analytics script loads at all.
