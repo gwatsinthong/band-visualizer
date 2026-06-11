@@ -475,7 +475,7 @@ function initAudio() {
 
   busses = {
     rhythm: makeAmp({
-      drive: 2.8, k: 7, level: 0.34,
+      drive: 2.8, k: 7, level: 0.3,
       eq: [
         ['highpass', 85, null, 0.7],
         ['peaking', 500, -7, 0.9],     // mid scoop
@@ -485,7 +485,7 @@ function initAudio() {
       ],
     }),
     lead: makeAmp({
-      drive: 2.2, k: 5, level: 0.42,
+      drive: 2.2, k: 5, level: 0.38,
       eq: [
         ['highpass', 220, null, 0.7],
         ['peaking', 1500, 3, 1],
@@ -494,7 +494,7 @@ function initAudio() {
       ],
     }),
     bass: makeAmp({
-      drive: 1.7, k: 3, level: 0.5,
+      drive: 1.7, k: 3, level: 0.46,
       eq: [
         ['highpass', 32, null, 0.7],
         ['peaking', 750, 4, 1],        // growl
@@ -576,6 +576,17 @@ function ksBuffer(midi, dur, { pm, tau, damp, pickLP }) {
   return buf;
 }
 
+// crisp pick-attack transient (clean path, not through the amp — adds realism + masks the sterile attack)
+function pickNoise(t, amt) {
+  const src = ctx.createBufferSource(); src.buffer = noiseBuf;
+  const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 3000;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.032 * amt, t);
+  g.gain.exponentialRampToValueAtTime(0.0008, t + 0.022);
+  src.connect(hp); hp.connect(g); g.connect(master);
+  src.start(t, Math.random() * 0.5); src.stop(t + 0.05);
+}
+
 function pluck(bus, t, midi, dur, { pm = false, vel = 1, vibrato = false, bass = false, lead = false } = {}) {
   const opts = pm
     ? { pm, tau: bass ? 0.11 : 0.055, damp: 0.6, pickLP: bass ? 0.6 : 0.3 }
@@ -584,15 +595,23 @@ function pluck(bus, t, midi, dur, { pm = false, vel = 1, vibrato = false, bass =
 
   const src = ctx.createBufferSource();
   src.buffer = buf;
+  // per-note pitch variation: cached buffers are bit-identical, which is what made
+  // repeated notes sound robotic. A few cents of wobble + drift de-correlates them.
+  const wobble = (Math.random() - 0.5) * (bass ? 5 : 11);
+  src.detune.setValueAtTime(wobble, t);
+  if (!pm && dur > 0.25) src.detune.linearRampToValueAtTime(wobble + (Math.random() - 0.5) * 8, t + dur);
+
   const g = ctx.createGain();
-  g.gain.value = 0.55 * vel;
+  g.gain.value = 0.55 * vel * (0.88 + Math.random() * 0.24); // ±12% dynamics per note
   src.connect(g); g.connect(bus.in);
 
+  if (!bass) pickNoise(t, pm ? 0.45 : 0.9);
+
   if (vibrato) {
-    const lfo = ctx.createOscillator(); lfo.frequency.value = 5.3;
+    const lfo = ctx.createOscillator(); lfo.frequency.value = 5.0 + Math.random() * 0.9;
     const lg = ctx.createGain();
     lg.gain.setValueAtTime(0, t);
-    lg.gain.linearRampToValueAtTime(0.011, t + 0.45);
+    lg.gain.linearRampToValueAtTime(0.012, t + 0.4);
     lfo.connect(lg); lg.connect(src.playbackRate);
     lfo.start(t); lfo.stop(t + buf.duration);
   }
@@ -648,17 +667,20 @@ function chipBassNote(t, midi, dur, vel = 1) {
   o.start(t); o.stop(t + dur + 0.05);
 }
 
-/* --- mode-aware note dispatchers (the schedule calls these) --- */
+/* --- mode-aware note dispatchers (the schedule calls these) ---
+ * Metal gets a few ms of timing jitter so it doesn't sit on a perfect grid;
+ * chip stays dead-on the grid (that tightness is part of its charm). */
+const jit = ms => (Math.random() - 0.5) * ms;
 function playRhythm(at, m, dur, pm, vel) {
-  if (soundMode === 'metal') pluck(busses.rhythm, at, m, dur, { pm, vel });
+  if (soundMode === 'metal') pluck(busses.rhythm, at + jit(0.012), m, dur, { pm, vel });
   else chipPulse(busses.chipR, at, m, dur, { wave: PW25, pm, vel });
 }
 function playLead(at, m, dur, vib) {
-  if (soundMode === 'metal') pluck(busses.lead, at, m, dur, { lead: true, vibrato: vib });
+  if (soundMode === 'metal') pluck(busses.lead, at + jit(0.016), m, dur, { lead: true, vibrato: vib });
   else chipPulse(busses.chipL, at, m, dur, { vel: 1.1, vibrato: vib });
 }
 function playBass(at, m, dur) {
-  if (soundMode === 'metal') pluck(busses.bass, at, m, dur, { bass: true, pm: dur <= 2 * STEP });
+  if (soundMode === 'metal') pluck(busses.bass, at + jit(0.008), m, dur, { bass: true, pm: dur <= 2 * STEP });
   else chipBassNote(at, m, dur);
 }
 
@@ -761,9 +783,10 @@ function buildSchedule() {
   const ev = [];
   for (const n of R) {
     const tones = n.ch ? [[n.m, 1], [n.m + 7, 0.8], [n.m + 12, 0.6]] : [[n.m, 1]];
-    for (const [m, gv] of tones) {
-      ev.push({ t: n.s * STEP, fire: at => playRhythm(at, m, n.d * STEP, n.pm, n.v * gv) });
-    }
+    tones.forEach(([m, gv], k) => {
+      // chords strum (downstroke) in metal mode instead of all strings at once
+      ev.push({ t: n.s * STEP, fire: at => playRhythm(at + (soundMode === 'metal' && n.ch ? k * 0.011 : 0), m, n.d * STEP, n.pm, n.v * gv) });
+    });
   }
   for (const n of L) {
     ev.push({ t: n.s * STEP, fire: at => playLead(at, n.m, n.d * STEP, n.d >= 6) });
@@ -1357,9 +1380,12 @@ document.getElementById('start').addEventListener('click', begin);
 document.getElementById('btnPlay').addEventListener('click', () => { if (started) setPlaying(!playing); });
 document.getElementById('btnRestart').addEventListener('click', () => { if (started) restart(); });
 document.getElementById('vol').addEventListener('input', e => { if (master) master.gain.value = parseFloat(e.target.value); });
-document.getElementById('btnSound').addEventListener('click', e => {
-  soundMode = soundMode === 'chip' ? 'metal' : 'chip';
-  e.target.textContent = soundMode === 'chip' ? '8-BIT' : 'METAL';
+function setSoundMode(mode) {
+  soundMode = mode;
+  document.querySelectorAll('#engine .eng').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+}
+document.querySelectorAll('#engine .eng').forEach(b => {
+  b.addEventListener('click', () => setSoundMode(b.dataset.mode));
 });
 document.querySelectorAll('#tracks .trk').forEach(b => {
   b.addEventListener('click', () => selectSong(Number(b.dataset.i)));

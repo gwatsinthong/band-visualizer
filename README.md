@@ -55,13 +55,18 @@ Each instrument has a character on stage, animated entirely from the note data:
 - **Composition** — each song is a builder function in `app.js` that writes step-sequencer
   data (a 16th-note grid at the song's tempo) using shared riff/beat helpers. Switching
   tracks reloads that data and rebuilds the audio schedule.
-- **Sound** — two engines, switchable live with the **8-BIT / METAL** button:
-  - **8-bit (default)** — video-game-style chiptune metal: 25%-duty pulse-wave rhythm
-    chords, square-wave lead with vibrato and arcade echo, NES-style triangle bass, and
-    noise-channel drums. Punchy and clean by construction.
-  - **Metal (amp sim)** — **Karplus-Strong plucked strings** (palm mutes heavily damped,
-    open chords ring) through a tanh `WaveShaperNode` amp with cab-sim EQ; 808-style
-    square-bank cymbals; generated-impulse-response convolver reverb.
+- **Sound** — **everything is synthesized live in the browser with the Web Audio API.**
+  Nothing is sampled, recorded, or downloaded — there are no audio files in this repo.
+  Two engines, switchable live from the top-center toggle:
+  - **8-bit (default)** — video-game-style chiptune, built the way a real NES sound chip
+    works: a 25%-duty pulse wave for the rhythm chords, a square-wave lead with vibrato and
+    arcade echo, a triangle-wave bass, and a noise channel for drums. Punchy and clean.
+  - **Metal (amp sim)** — **Karplus-Strong plucked strings** (a physical model of a vibrating
+    string; palm mutes heavily damped, open chords ring) through a tanh `WaveShaperNode` amp
+    with cab-sim EQ; 808-style square-bank cymbals; generated-impulse-response convolver
+    reverb. To avoid sounding robotic, every note is *humanized*: a few cents of random
+    pitch wobble/drift, ±12% dynamics, a few ms of timing jitter, chord strum spread, and a
+    crisp pick-attack transient — so repeated notes are never bit-identical.
 - **Visuals** — a single `<canvas>` renders the falling notes (lookahead of 2.4 s), moving
   beat grid, hit-line sparks, pulsing spotlights, and the four performers.
 - **Sync** — audio is scheduled with the standard Web Audio lookahead-scheduler pattern, and
@@ -73,6 +78,6 @@ Each instrument has a character on stage, animated entirely from the note data:
 - **1 / 2 / 3** (or the selector) — switch tracks
 - **Space / ⏸ button** — play / pause
 - **⏮** — restart
-- **8-BIT / METAL** — switch the sound engine on the fly
+- **8-BIT / METAL** (top-center toggle) — switch the sound engine on the fly
 - **LOOP** — toggle looping
 - **VOL** — master volume
